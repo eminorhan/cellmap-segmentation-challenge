@@ -92,10 +92,7 @@ class Attention(nn.Module):
         self.softmax = Softmax(dim=-1)
 
     def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (
-            self.num_attention_heads,
-            self.attention_head_size,
-        )
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
@@ -169,10 +166,7 @@ class Embeddings(nn.Module):
             kernel_size=patch_size,
             stride=patch_size,
         )
-        self.position_embeddings = nn.Parameter(
-            torch.zeros(1, n_patches, config.hidden_size)
-        )
-
+        self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches, config.hidden_size))
         self.dropout = Dropout(config.transformer["dropout_rate"])
 
     def forward(self, x):
@@ -259,9 +253,7 @@ class Conv3dReLU(nn.Sequential):
             bias=not (use_batchnorm),
         )
         relu = nn.ReLU(inplace=True)
-
         bn = nn.BatchNorm3d(out_channels)
-
         super(Conv3dReLU, self).__init__(conv, bn, relu)
 
 
@@ -406,9 +398,7 @@ class CNNEncoder(nn.Module):
 
 class RegistrationHead(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=3, upsampling=1):
-        conv3d = nn.Conv3d(
-            in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2
-        )
+        conv3d = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2)
         conv3d.weight = nn.Parameter(Normal(0, 1e-5).sample(conv3d.weight.shape))
         conv3d.bias = nn.Parameter(torch.zeros(conv3d.bias.shape))
         super().__init__(conv3d)
@@ -430,16 +420,12 @@ class ViTVNet(nn.Module):
         Whether to visualize the attention weights.
     """
 
-    def __init__(
-        self, out_channels, config="ViT-V-Net", img_size=(128, 128, 128), vis=False
-    ):
+    def __init__(self, out_channels, config="ViT-V-Net", img_size=(128, 128, 128), vis=False):
         super(ViTVNet, self).__init__()
         if isinstance(config, str):
             config = CONFIGS[config]
         else:
-            assert isinstance(
-                config, ml_collections.ConfigDict
-            ), "Is not a config object or the name of one"
+            assert isinstance(config, ml_collections.ConfigDict), "Is not a config object or the name of one"
         self.transformer = Transformer(config, img_size, vis)
         self.decoder = DecoderCup(config, img_size)
         self.reg_head = RegistrationHead(
@@ -450,7 +436,6 @@ class ViTVNet(nn.Module):
         self.config = config
 
     def forward(self, x):
-
         x, attn_weights, features = self.transformer(x)  # (B, n_patch, hidden)
         x = self.decoder(x, features)
         out = self.reg_head(x)

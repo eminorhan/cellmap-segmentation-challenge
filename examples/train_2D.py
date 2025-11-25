@@ -17,51 +17,59 @@
 # Once the model is trained, you can use the `predict` function to make predictions on new data using the trained model. See the `predict_2D.py` example for more details.
 
 # %% Imports
+import torch
 from upath import UPath
-
 from cellmap_segmentation_challenge.models import ResNet, UNet_2D
+from cellmap_segmentation_challenge.utils import get_tested_classes
+from dinov3.eval.segmentation.models import build_segmentation_decoder
 
 # %% Set hyperparameters and other configurations
-learning_rate = 0.0001  # learning rate for the optimizer
-batch_size = 8  # batch size for the dataloader
-input_array_info = {
-    "shape": (1, 128, 128),
-    "scale": (8, 8, 8),
-}  # shape and voxel size of the data to load for the input
-target_array_info = {
-    "shape": (1, 128, 128),
-    "scale": (8, 8, 8),
-}  # shape and voxel size of the data to load for the target
-epochs = 1000  # number of epochs to train the model for
-iterations_per_epoch = 1000  # number of iterations per epoch
+learning_rate = 3e-4  # learning rate for the optimizer
+batch_size = 128  # batch size for the dataloader
+input_array_info = {"shape": (1, 256, 256), "scale": (8, 8, 8)}  # shape and voxel size of the data to load for the input
+target_array_info = {"shape": (1, 256, 256), "scale": (8, 8, 8)}  # shape and voxel size of the data to load for the target
+epochs = 100  # number of epochs to train the model for
+iterations_per_epoch = 100  # number of iterations per epoch
+warmup_steps = 100  # warmup steps for linear lr decay scheduler 
 random_seed = 42  # random seed for reproducibility
 
-classes = ["nuc", "er"]  # list of classes to segment
+# classes = ["nuc", "er"]  # list of classes to segment
+classes = get_tested_classes()  # list of classes to segment
+print(f"Tested classes ({len(classes)}): {classes}")
 
 # Defining model (comment out all that are not used)
 # 2D UNet
-model_name = "2d_unet"  # name of the model to use
-model_to_load = "2d_unet"  # name of the pre-trained model to load
-model = UNet_2D(1, len(classes))
+# model_name = "2d_unet"  # name of the model to use
+# model_to_load = "2d_unet"  # name of the pre-trained model to load
+# model = UNet_2D(1, len(classes))
 
 # # 2D ResNet [uncomment to use]
 # model_name = "2d_resnet"  # name of the model to use
 # model_to_load = "2d_resnet"  # name of the pre-trained model to load
 # model = ResNet(ndims=2, output_nc=len(classes))
 
+# ###### dinov3 model ######
+# change the following vars according to your setup
+TORCH_HUB_PATH = "/lustre/gale/stf218/scratch/emin/torch_hub"  # this is where the dinov3 pth checkpoints are stored
+DINOV3_REPO_PATH = "/lustre/gale/stf218/scratch/emin/dinov3"  # dinov3 repo path
+
+torch.hub.set_dir(TORCH_HUB_PATH)
+
+model_name = "dinov3_vitl16_linear"
+model_to_load = "dinov3_vitl16_linear"
+backbone = torch.hub.load(DINOV3_REPO_PATH, "dinov3_vitl16", source="local", weights=f"{TORCH_HUB_PATH}/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth", in_chans=1, pretrained=True)
+model = build_segmentation_decoder(backbone, decoder_type="linear", num_classes=len(classes))
+############################
+
 load_model = "latest"  # load the "latest" model or the "best" validation model
 
 # Define the paths for saving the model and logs, etc.
-logs_save_path = UPath(
-    "tensorboard/{model_name}"
-).path  # path to save the logs from tensorboard
-model_save_path = UPath(
-    "checkpoints/{model_name}_{epoch}.pth"  # path to save the model checkpoints
-).path
+logs_save_path = UPath("tensorboard/{model_name}").path  # path to save the logs from tensorboard
+model_save_path = UPath("checkpoints/{model_name}_{epoch}.pth").path  # path to save the model checkpoints
 datasplit_path = "datasplit.csv"  # path to the datasplit file that defines the train/val split the dataloader should use
 
 # Define the spatial transformations to apply to the training data
-spatial_transforms = {  # dictionary of spatial transformations to apply to the data
+spatial_transforms = {
     "mirror": {"axes": {"x": 0.5, "y": 0.5}},
     "transpose": {"axes": ["x", "y"]},
     "rotate": {"axes": {"x": [-180, 180], "y": [-180, 180]}},

@@ -23,6 +23,15 @@ from .utils import (
 )
 
 
+# LR Schedule Lambda function
+def get_lr_lambda(current_step, warmup_steps, train_steps):
+    if current_step < warmup_steps:
+        # Linear warm-up
+        return float(current_step) / float(max(1, warmup_steps))
+    # Linear decay
+    return max(0.0, float(train_steps - current_step) / float(max(1, train_steps - warmup_steps)))
+
+
 def train(config_path: str):
     """
     Train a model using the configuration file at the specified path. The model checkpoints and training logs, as well as the datasets used for training, will be saved to the paths specified in the configuration file.
@@ -65,8 +74,6 @@ def train(config_path: str):
         - target_value_transforms: Transform to apply to the target values. Default is T.Compose([T.ToDtype(torch.float), Binarize()]) which converts the input masks to float32 and threshold at 0 (turning object ID's into binary masks for use with binary cross entropy loss). This can be used to specify other targets, such as distance transforms.
         - max_grad_norm: Maximum gradient norm for clipping. If None, no clipping is performed. Default is None. This can be useful to prevent exploding gradients which would lead to NaNs in the weights.
         - force_all_classes: Whether to force all classes to be present in each batch provided by dataloaders. Can either be `True` to force this for both validation and training dataloader, `False` to force for neither, or `train` / `validate` to restrict it to training or validation, respectively. Default is 'validate'.
-        - scheduler: PyTorch learning rate scheduler (or uninstantiated class) to use for training. Default is None. If provided, the scheduler will be called at the end of each epoch.
-        - scheduler_kwargs: Dictionary of keyword arguments to pass to the scheduler constructor. Default is {}. If `scheduler` instantiation is provided, this will be ignored.
         - filter_by_scale: Whether to filter the data by scale. If True, only data with a scale less than or equal to the `input_array_info` highest resolution will be included in the datasplit. If set to a scalar value, data will be filtered for that isotropic resolution - anisotropic can be specified with a sequence of scalars. Default is False (no filtering).
         - gradient_accumulation_steps: Number of gradient accumulation steps to use. Default is 1. This can be used to simulate larger batch sizes without increasing memory usage.
         - dataloader_kwargs: Additional keyword arguments to pass to the CellMapDataLoader. Default is {}.
@@ -82,111 +89,53 @@ def train(config_path: str):
     # %% Load the configuration file
     config = load_safe_config(config_path)
     # %% Set hyperparameters and other configurations from the config file
-    base_experiment_path = getattr(
-        config, "base_experiment_path", UPath(config_path).parent
-    )
+    base_experiment_path = getattr(config, "base_experiment_path", UPath(config_path).parent)
     base_experiment_path = UPath(base_experiment_path)
-    model_save_path = getattr(
-        config,
-        "model_save_path",
-        (base_experiment_path / "checkpoints" / "{model_name}_{epoch}.pth").path,
-    )
-    logs_save_path = getattr(
-        config,
-        "logs_save_path",
-        (base_experiment_path / "tensorboard" / "{model_name}").path,
-    )
-    datasplit_path = getattr(
-        config, "datasplit_path", (base_experiment_path / "datasplit.csv").path
-    )
+    model_save_path = getattr(config, "model_save_path", (base_experiment_path / "checkpoints" / "{model_name}_{epoch}.pth").path)
+    logs_save_path = getattr(config, "logs_save_path", (base_experiment_path / "tensorboard" / "{model_name}").path)
+    datasplit_path = getattr(config, "datasplit_path", (base_experiment_path / "datasplit.csv").path)
     validation_prob = getattr(config, "validation_prob", 0.15)
     learning_rate = getattr(config, "learning_rate", 0.0001)
     batch_size = getattr(config, "batch_size", 8)
     filter_by_scale = getattr(config, "filter_by_scale", False)
-    input_array_info = getattr(
-        config, "input_array_info", {"shape": (1, 128, 128), "scale": (8, 8, 8)}
-    )
+    input_array_info = getattr(config, "input_array_info", {"shape": (1, 128, 128), "scale": (8, 8, 8)})
     target_array_info = getattr(config, "target_array_info", input_array_info)
     epochs = getattr(config, "epochs", 1000)
     iterations_per_epoch = getattr(config, "iterations_per_epoch", 1000)
+    warmup_steps = getattr(config, "warmup_steps", 100)
     random_seed = getattr(config, "random_seed", getattr(os.environ, "SEED", 42))
     classes = getattr(config, "classes", ["nuc", "er"])
     model_name = getattr(config, "model_name", "2d_unet")
     model_to_load = getattr(config, "model_to_load", model_name)
     model_kwargs = getattr(config, "model_kwargs", {})
     model = getattr(config, "model", None)
-    spatial_transforms = getattr(
-        config,
-        "spatial_transforms",
-        {
-            "mirror": {"axes": {"x": 0.5, "y": 0.5}},
-            "transpose": {"axes": ["x", "y"]},
-            "rotate": {"axes": {"x": [-180, 180], "y": [-180, 180]}},
-        },
-    )
+    spatial_transforms = getattr(config, "spatial_transforms", {"mirror": {"axes": {"x": 0.5, "y": 0.5}}, "transpose": {"axes": ["x", "y"]}, "rotate": {"axes": {"x": [-180, 180], "y": [-180, 180]}}})
     validation_time_limit = getattr(config, "validation_time_limit", None)
     validation_batch_limit = getattr(config, "validation_batch_limit", None)
     device = getattr(config, "device", None)
     use_s3 = getattr(config, "use_s3", False)
     use_mutual_exclusion = getattr(config, "use_mutual_exclusion", False)
     weighted_sampler = getattr(config, "weighted_sampler", True)
-    train_raw_value_transforms = getattr(
-        config,
-        "train_raw_value_transforms",
-        T.Compose(
-            [
-                T.ToDtype(torch.float),
-                Normalize(),
-                NaNtoNum({"nan": 0, "posinf": None, "neginf": None}),
-            ],
-        ),
-    )
-    val_raw_value_transforms = getattr(
-        config,
-        "val_raw_value_transforms",
-        T.Compose(
-            [
-                T.ToDtype(torch.float),
-                Normalize(),
-                NaNtoNum({"nan": 0, "posinf": None, "neginf": None}),
-            ],
-        ),
-    )
-    target_value_transforms = getattr(
-        config,
-        "target_value_transforms",
-        T.Compose([T.ToDtype(torch.float), Binarize()]),
-    )
+    train_raw_value_transforms = getattr(config, "train_raw_value_transforms", T.Compose([T.ToDtype(torch.float), Normalize(), NaNtoNum({"nan": 0, "posinf": None, "neginf": None})]))
+    val_raw_value_transforms = getattr(config, "val_raw_value_transforms", T.Compose([T.ToDtype(torch.float), Normalize(), NaNtoNum({"nan": 0, "posinf": None, "neginf": None})]))
+    target_value_transforms = getattr(config, "target_value_transforms", T.Compose([T.ToDtype(torch.float), Binarize()]))
     max_grad_norm = getattr(config, "max_grad_norm", None)
     force_all_classes = getattr(config, "force_all_classes", "validate")
 
     # %% Define the optimizer, from the config file or default to RAdam
-    optimizer = getattr(
-        config,
-        "optimizer",
-        torch.optim.RAdam(
-            model.parameters(), lr=learning_rate, decoupled_weight_decay=True
-        ),
-    )
+    optimizer = getattr(config, "optimizer", torch.optim.AdamW(model.parameters(), lr=learning_rate))
 
-    # %% Define the scheduler, from the config file or default to None
-    scheduler = getattr(config, "scheduler", None)
-    if isinstance(scheduler, type):
-        scheduler_kwargs = getattr(config, "scheduler_kwargs", {})
-        scheduler = scheduler(optimizer, **scheduler_kwargs)
+    lr_lambda = lambda step: get_lr_lambda(step, warmup_steps, epochs * iterations_per_epoch)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # %% Define the loss function, from the config file or default to BCEWithLogitsLoss
     criterion = getattr(config, "criterion", torch.nn.BCEWithLogitsLoss)
     criterion_kwargs = getattr(config, "criterion_kwargs", {})
     weight_loss = getattr(config, "weight_loss", True)
 
-    gradient_accumulation_steps = getattr(
-        config, "gradient_accumulation_steps", 1
-    )  # default to 1 for no accumulation
+    gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)  # default to 1 for no accumulation
     if gradient_accumulation_steps < 1:
-        raise ValueError(
-            f"gradient_accumulation_steps must be >= 1, but got {gradient_accumulation_steps}"
-        )
+        raise ValueError(f"gradient_accumulation_steps must be >= 1, but got {gradient_accumulation_steps}")
 
     # %% Make sure the save path exists
     for path in [model_save_path, logs_save_path, datasplit_path]:
@@ -231,6 +180,7 @@ def train(config_path: str):
                 scale = highest_res
         else:
             scale = None
+            
         # Make the datasplit CSV
         if use_s3:
             make_s3_datasplit_csv(
@@ -276,24 +226,18 @@ def train(config_path: str):
             elif "resnet" in model_name.lower():
                 model = ResNet(ndims=2, output_nc=len(classes), **model_kwargs)
             else:
-                raise ValueError(
-                    f"Unknown model name: {model_name}. Preconfigured 2D models are '2d_unet' and '2d_resnet'."
-                )
+                raise ValueError(f"Unknown model name: {model_name}. Preconfigured 2D models are '2d_unet' and '2d_resnet'.")
         elif "3d" in model_name.lower():
             if "unet" in model_name.lower():
                 model = UNet_3D(1, len(classes), **model_kwargs)
             elif "resnet" in model_name.lower():
                 model = ResNet(ndims=3, output_nc=len(classes), **model_kwargs)
             else:
-                raise ValueError(
-                    f"Unknown model name: {model_name}. Preconfigured 3D models are '3d_unet' and '3d_resnet', or 'vitnet'."
-                )
+                raise ValueError(f"Unknown model name: {model_name}. Preconfigured 3D models are '3d_unet' and '3d_resnet', or 'vitnet'.")
         elif "vitnet" in model_name.lower():
             model = ViTVNet(len(classes), **model_kwargs)
         else:
-            raise ValueError(
-                f"Unknown model name: {model_name}. Preconfigured models are '2d_unet', '2d_resnet', '3d_unet', '3d_resnet', and 'vitnet'. Otherwise provide a custom model as a torch.nn.Module."
-            )
+            raise ValueError(f"Unknown model name: {model_name}. Preconfigured models are '2d_unet', '2d_resnet', '3d_unet', '3d_resnet', and 'vitnet'. Otherwise provide a custom model as a torch.nn.Module.")
 
     # Optionally, load a pre-trained model
     checkpoint_epoch = get_model(config)
@@ -310,14 +254,13 @@ def train(config_path: str):
 
     # %% Move model to device
     model = model.to(device)
+    print(f"Model: {model}")
 
     # Deduce number of spatial dimensions
     if "shape" in target_array_info:
         spatial_dims = sum([s > 1 for s in target_array_info["shape"]])
     else:
-        spatial_dims = sum(
-            [s > 1 for s in list(target_array_info.values())[0]["shape"]]
-        )
+        spatial_dims = sum([s > 1 for s in list(target_array_info.values())[0]["shape"]])
 
     # Use custom loss function wrapper that handles NaN values in the target. This works with any PyTorch loss function
     if weight_loss:
@@ -341,9 +284,7 @@ def train(config_path: str):
     writer = SummaryWriter(format_string(logs_save_path, {"model_name": model_name}))
 
     # Training outer loop, across epochs
-    print(
-        f"Training {model_name} for {len(epochs)} epochs, starting at epoch {epochs[0]}, iteration {n_iter}..."
-    )
+    print(f"Training {model_name} for {len(epochs)} epochs, starting at epoch {epochs[0]}, iteration {n_iter}...")
     for epoch in epochs:
 
         # Set the model to training mode to enable backpropagation
@@ -358,10 +299,9 @@ def train(config_path: str):
         # epoch_bar = tqdm(train_loader.loader, desc="Training", dynamic_ncols=True)
         # for batch in epoch_bar:
         loader = iter(train_loader.loader)
-        epoch_bar = tqdm(
-            range(iterations_per_epoch), desc="Training", dynamic_ncols=True
-        )
+        epoch_bar = tqdm(range(iterations_per_epoch), desc="Training", dynamic_ncols=True)
         optimizer.zero_grad()
+
         for epoch_iter in epoch_bar:
             # for some reason this seems to be faster...
             batch = next(loader)
@@ -382,8 +322,35 @@ def train(config_path: str):
                 targets = {key: batch[key] for key in target_keys}
             else:
                 targets = batch[target_keys[0]]
-                # Assumes the model output is a single tensor
+
+            # Upsample model outputs to be same size as the target (TODO: come up with a more robust way to determine if model is 2D or 3D)
+            if input_array_info["shape"][0] == 1:
+                outputs = torch.nn.functional.interpolate(input=outputs, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+            else:
+                outputs = torch.nn.functional.interpolate(input=outputs, size=targets.shape[-3:], mode="trilinear", align_corners=False)
+
             loss = criterion(outputs, targets) / gradient_accumulation_steps
+
+            # print(f"Inputs shape: {inputs.shape}")
+            # print(f"Outputs shape: {outputs.shape}")
+            # print(f"Targets shape: {targets.shape}")
+            # print(f"Targets min/max: {torch.nan_to_num(targets, nan=torch.inf).min()}/{torch.nan_to_num(targets, nan=-torch.inf).max()}")
+            # print(f"Targets: {targets[0, :, 0, 0]}")
+            # print(f"Targets: {targets[1, :, 0, 0]}")
+            # print(f"Targets: {targets[2, :, 0, 0]}")
+            # print(f"Targets: {targets[3, :, 0, 0]}")
+            # print(f"Targets: {targets[4, :, 0, 0]}")
+            # print(f"Targets: {targets[5, :, 0, 0]}")
+            # print(f"Targets: {targets[6, :, 0, 0]}")
+            # print(f"Targets: {targets[7, :, 0, 0]}")
+            # print(f"Targets: {targets[0, :, 1, 9]}")
+            # print(f"Targets: {targets[1, :, 100, 10]}")
+            # print(f"Targets: {targets[2, :, 80, 20]}")
+            # print(f"Targets: {targets[3, :, 70, 50]}")
+            # print(f"Targets: {targets[4, :, 60, 30]}")
+            # print(f"Targets: {targets[5, :, 30, 20]}")
+            # print(f"Targets: {targets[6, :, 100, 150]}")
+            # print(f"Targets: {targets[7, :, 150, 190]}")
 
             # Backward pass (compute the gradients)
             loss.backward()
@@ -393,32 +360,26 @@ def train(config_path: str):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
             # Update the weights
-            if (
-                epoch_iter % gradient_accumulation_steps == 0
-                or epoch_iter == iterations_per_epoch - 1
-            ):
+            if epoch_iter % gradient_accumulation_steps == 0 or epoch_iter == iterations_per_epoch - 1:
                 # Only update the weights every `gradient_accumulation_steps` iterations
                 # This allows for larger effective batch sizes without increasing memory usage
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
 
             # Update the progress bar
             post_fix_dict["Loss"] = f"{loss.item()}"
+            post_fix_dict["lr"] = f"{scheduler.get_last_lr()[0]}"
+            post_fix_dict["Step"] = f"{n_iter}"
+
             epoch_bar.set_postfix(post_fix_dict)
 
             # Log the loss using tensorboard
             writer.add_scalar("loss", loss.item(), n_iter)
-
-        if scheduler is not None:
-            # Step the scheduler at the end of each epoch
-            scheduler.step()
             writer.add_scalar("lr", scheduler.get_last_lr()[0], n_iter)
 
         # Save the model
-        torch.save(
-            model.state_dict(),
-            format_string(model_save_path, {"epoch": epoch, "model_name": model_name}),
-        )
+        torch.save(model.state_dict(), format_string(model_save_path, {"epoch": epoch, "model_name": model_name}))
 
         # Compute the validation score by averaging the loss across the validation set
         if len(val_loader.loader) > 0:
@@ -474,10 +435,7 @@ def train(config_path: str):
                         pbar.update(last_elapsed_time)
                         last_time = time.time()
                     # Check batch limit
-                    elif (
-                        validation_batch_limit is not None
-                        and i >= validation_batch_limit
-                    ):
+                    elif validation_batch_limit is not None and i >= validation_batch_limit:
                         break
                 val_score /= i
 
@@ -526,5 +484,3 @@ def train(config_path: str):
 
     # Close the summarywriter
     writer.close()
-
-    # %%

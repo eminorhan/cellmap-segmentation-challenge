@@ -22,9 +22,7 @@ from .utils import load_safe_config, get_test_crops
 from .utils.datasplit import get_formatted_fields, get_raw_path
 
 
-def predict_orthoplanes(
-    model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int
-):
+def predict_orthoplanes(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int):
     print("Predicting orthogonal planes.")
 
     # Make a temporary prediction for each axis
@@ -95,9 +93,7 @@ def predict_orthoplanes(
     tmp_dir.cleanup()
 
 
-def _predict(
-    model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int
-):
+def _predict(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int):
     """
     Predicts the output of a model on a large dataset by splitting it into blocks and predicting each block separately.
 
@@ -119,17 +115,13 @@ def _predict(
         ],
     )
 
-    dataset_writer = CellMapDatasetWriter(
-        **dataset_writer_kwargs, raw_value_transforms=value_transforms
-    )
+    dataset_writer = CellMapDatasetWriter(**dataset_writer_kwargs, raw_value_transforms=value_transforms)
     dataloader = dataset_writer.loader(batch_size=batch_size)
     model.eval()
     # Find singleton dimension if there is one
     # Only the first singleton dimension will be used for squeezing/unsqueezing.
     # If there are multiple singleton dimensions, only the first is handled.
-    singleton_dim = np.where(
-        [s == 1 for s in dataset_writer_kwargs["input_arrays"]["input"]["shape"]]
-    )[0]
+    singleton_dim = np.where([s == 1 for s in dataset_writer_kwargs["input_arrays"]["input"]["shape"]])[0]
     singleton_dim = singleton_dim[0] if singleton_dim.size > 0 else None
     with torch.no_grad():
         for batch in tqdm(dataloader, dynamic_ncols=True):
@@ -182,9 +174,7 @@ def predict(
     config = load_safe_config(config_path)
     classes = config.classes
     batch_size = getattr(config, "batch_size", 8)
-    input_array_info = getattr(
-        config, "input_array_info", {"shape": (1, 128, 128), "scale": (8, 8, 8)}
-    )
+    input_array_info = getattr(config, "input_array_info", {"shape": (1, 128, 128), "scale": (8, 8, 8)})
     target_array_info = getattr(config, "target_array_info", input_array_info)
     model = config.model
 

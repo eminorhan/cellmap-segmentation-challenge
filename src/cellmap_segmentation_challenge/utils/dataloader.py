@@ -16,23 +16,9 @@ def get_dataloader(
     input_array_info: Optional[Mapping[str, Sequence[int | float]]] = None,
     target_array_info: Optional[Mapping[str, Sequence[int | float]]] = None,
     spatial_transforms: Optional[Mapping[str, Any]] = None,
-    target_value_transforms: Optional[T.Transform] = T.Compose(
-        [T.ToDtype(torch.float), Binarize()]
-    ),
-    train_raw_value_transforms: Optional[T.Transform] = T.Compose(
-        [
-            T.ToDtype(torch.float),
-            Normalize(),
-            NaNtoNum({"nan": 0, "posinf": None, "neginf": None}),
-        ],
-    ),
-    val_raw_value_transforms: Optional[T.Transform] = T.Compose(
-        [
-            T.ToDtype(torch.float),
-            Normalize(),
-            NaNtoNum({"nan": 0, "posinf": None, "neginf": None}),
-        ],
-    ),
+    target_value_transforms: Optional[T.Transform] = T.Compose([T.ToDtype(torch.float), Binarize()]),
+    train_raw_value_transforms: Optional[T.Transform] = T.Compose([T.ToDtype(torch.float), Normalize(), NaNtoNum({"nan": 0, "posinf": None, "neginf": None})]),
+    val_raw_value_transforms: Optional[T.Transform] = T.Compose([T.ToDtype(torch.float), Normalize(), NaNtoNum({"nan": 0, "posinf": None, "neginf": None})]),
     iterations_per_epoch: int = 1000,
     random_validation: bool = False,
     device: Optional[str | torch.device] = None,
@@ -110,21 +96,13 @@ def get_dataloader(
         # If a config is provided, use it to override the default values
         datasplit_path = config.get("datasplit_path", datasplit_path)
         classes = config.get("classes", classes)
-        batch_size = config.get(
-            "train_micro_batch_size_per_gpu", config.get("batch_size", batch_size)
-        )
+        batch_size = config.get("train_micro_batch_size_per_gpu", config.get("batch_size", batch_size))
         input_array_info = config.get("input_array_info", input_array_info)
         target_array_info = config.get("target_array_info", target_array_info)
         spatial_transforms = config.get("spatial_transforms", spatial_transforms)
-        target_value_transforms = config.get(
-            "target_value_transforms", target_value_transforms
-        )
-        train_raw_value_transforms = config.get(
-            "train_raw_value_transforms", train_raw_value_transforms
-        )
-        val_raw_value_transforms = config.get(
-            "val_raw_value_transforms", val_raw_value_transforms
-        )
+        target_value_transforms = config.get("target_value_transforms", target_value_transforms)
+        train_raw_value_transforms = config.get("train_raw_value_transforms", train_raw_value_transforms)
+        val_raw_value_transforms = config.get("val_raw_value_transforms", val_raw_value_transforms)
         iterations_per_epoch = config.get("iterations_per_epoch", iterations_per_epoch)
         random_validation = config.get("random_validation", random_validation)
         device = config.get("device", device)
@@ -132,20 +110,12 @@ def get_dataloader(
         weighted_sampler = config.get("weighted_sampler", weighted_sampler)
         kwargs.update(config.get("kwargs", {}))
     # If "shape" and "scale" are not top level keys in the array_info dict, then we can assume a full dictionary of input arrays are being passed in
-    if (
-        "shape" in input_array_info
-        and "scale" in input_array_info
-        and len(input_array_info.keys()) == 2
-    ):
+    if "shape" in input_array_info and "scale" in input_array_info and len(input_array_info.keys()) == 2:
         input_arrays = {"input": input_array_info}
     else:
         input_arrays = input_array_info
 
-    if target_array_info is not None and (
-        "shape" in target_array_info
-        and "scale" in target_array_info
-        and len(target_array_info.keys()) == 2
-    ):
+    if target_array_info is not None and "shape" in target_array_info and "scale" in target_array_info and len(target_array_info.keys()) == 2:
         target_arrays = {"output": target_array_info}
     else:
         target_arrays = target_array_info
@@ -187,10 +157,7 @@ def get_dataloader(
             "device": device,
         }
         _kwargs.update(kwargs)
-        validation_loader = CellMapDataLoader(
-            datasplit.validation_blocks.to(device),
-            **_kwargs,
-        )
+        validation_loader = CellMapDataLoader(datasplit.validation_blocks.to(device), **_kwargs)
     else:
         validation_loader = None
 
@@ -203,9 +170,6 @@ def get_dataloader(
         "is_train": True,
     }
     _kwargs.update(kwargs)
-    train_loader = CellMapDataLoader(
-        datasplit.train_datasets_combined.to(device),
-        **_kwargs,
-    )
+    train_loader = CellMapDataLoader(datasplit.train_datasets_combined.to(device), **_kwargs)
 
     return train_loader, validation_loader  # type: ignore
