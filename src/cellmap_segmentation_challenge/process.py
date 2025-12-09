@@ -73,7 +73,6 @@ def process(
         The device to use for processing the data. Default is to use that specified in the config. If not specified, then defaults to "cuda" if available, then "mps", otherwise "cpu".
     max_workers: int, optional
         The maximum number of workers to use for processing the data. Default is the number of CPUs on the system.
-
     """
     config = load_safe_config(config_path)
     process_func = config.process_func
@@ -111,9 +110,7 @@ def process(
             crop = f"crop{crop}"
             crop_list[i] = crop  # type: ignore
 
-        crop_paths.extend(
-            glob(input_path.format(dataset="*", crop=crop).rstrip(os.path.sep))
-        )
+        crop_paths.extend(glob(input_path.format(dataset="*", crop=crop).rstrip(os.path.sep)))
 
     crop_dict = {}
     for crop, path in zip(crop_list, crop_paths):

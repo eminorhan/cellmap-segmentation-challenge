@@ -668,9 +668,7 @@ def combine_scores(
             overall_semantic_scores += [label_scores[label]["iou"]]
     scores["overall_instance_score"] = np.mean(overall_instance_scores)
     scores["overall_semantic_score"] = np.mean(overall_semantic_scores)
-    scores["overall_score"] = (
-        scores["overall_instance_score"] * scores["overall_semantic_score"]
-    ) ** 0.5  # geometric mean
+    scores["overall_score"] = (scores["overall_instance_score"] * scores["overall_semantic_score"]) ** 0.5  # geometric mean
 
     return scores
 
@@ -931,9 +929,7 @@ def resize_array(arr, target_shape, pad_value=0):
             pad_width.append((0, 0))
 
     if any(pad > 0 for pads in pad_width for pad in pads):
-        resized_arr = np.pad(
-            resized_arr, pad_width, mode="constant", constant_values=pad_value
-        )
+        resized_arr = np.pad(resized_arr, pad_width, mode="constant", constant_values=pad_value)
 
     # Crop if the array is larger than the target shape
     slices = []
@@ -964,6 +960,7 @@ def match_crop_space(path, class_label, voxel_size, shape, translation) -> np.nd
     Returns:
         np.ndarray: The rescaled array.
     """
+    # print(f"Opening {str(path)}")
     ds = zarr.open(str(path), mode="r")
     if "multiscales" in ds.attrs:
         # Handle multiscale zarr files
@@ -1008,9 +1005,7 @@ def match_crop_space(path, class_label, voxel_size, shape, translation) -> np.nd
             input_translation = None
     else:
         logging.info(f"Could not find voxel size and translation for {path}")
-        logging.info(
-            "Assuming voxel size matches target voxel size and will crop to target shape centering the volume."
-        )
+        logging.info("Assuming voxel size matches target voxel size and will crop to target shape centering the volume.")
         image = ds[:]
         # Crop the array if necessary
         if any(s1 != s2 for s1, s2 in zip(image.shape, shape)):
@@ -1021,28 +1016,17 @@ def match_crop_space(path, class_label, voxel_size, shape, translation) -> np.nd
     image = ds[:]
 
     # Rescale the array if necessary
-    if input_voxel_size is not None and any(
-        r1 != r2 for r1, r2 in zip(input_voxel_size, voxel_size)
-    ):
+    if input_voxel_size is not None and any(r1 != r2 for r1, r2 in zip(input_voxel_size, voxel_size)):
+        print(f"Rescaling the crop...")
         if class_label in INSTANCE_CLASSES:
-            image = rescale(
-                image, np.divide(input_voxel_size, voxel_size), order=0, mode="constant"
-            )
+            image = rescale(image, np.divide(input_voxel_size, voxel_size), order=0, mode="constant")
         else:
-            image = rescale(
-                image,
-                np.divide(input_voxel_size, voxel_size),
-                order=1,
-                mode="constant",
-                preserve_range=True,
-            )
+            image = rescale(image, np.divide(input_voxel_size, voxel_size), order=1, mode="constant", preserve_range=True)
             image = image > 0.5
 
     if input_translation is not None:
         # Calculate the relative offset
-        adjusted_input_translation = (
-            np.array(input_translation) // np.array(voxel_size)
-        ) * np.array(voxel_size)
+        adjusted_input_translation = (np.array(input_translation) // np.array(voxel_size)) * np.array(voxel_size)
 
         # Positive relative offset is the amount to crop from the start, negative is the amount to pad at the start
         relative_offset = (
@@ -1055,12 +1039,8 @@ def match_crop_space(path, class_label, voxel_size, shape, translation) -> np.nd
         relative_offset = np.zeros(len(shape))
 
     # Translate and crop the array if necessary
-    if any(offset != 0 for offset in relative_offset) or any(
-        s1 != s2 for s1, s2 in zip(image.shape, shape)
-    ):
-        logging.info(
-            f"Translating and cropping {path} to {shape} with offset {relative_offset}"
-        )
+    if any(offset != 0 for offset in relative_offset) or any(s1 != s2 for s1, s2 in zip(image.shape, shape)):
+        logging.info(f"Translating and cropping {path} to {shape} with offset {relative_offset}")
         # Make destination array
         result = np.zeros(shape, dtype=image.dtype)
 
@@ -1122,12 +1102,23 @@ def unzip_file(zip_path):
 
 
 if __name__ == "__main__":
-    # When called on the commandline, evaluate the submission
-    # example usage: python evaluate.py submission.zip
-    argparser = argparse.ArgumentParser()
-    argparser.add_argument("submission_file", help="Path to submission zip file to score")
-    argparser.add_argument("result_file", nargs="?", help="If provided, store submission results in this file. Else print them to stdout")
-    argparser.add_argument("--truth-path", default=TRUTH_PATH, help="Path to zarr containing ground truth")
-    args = argparser.parse_args()
 
-    score_submission(args.submission_file, args.result_file, args.truth_path)
+    # Find volumes to score
+    submission_path = "/lustre/gale/stf218/scratch/emin/cellmap-segmentation-challenge/data/submission.zarr"
+    logging.info(f"Scoring volumes in {submission_path}...")
+    pred_volumes = [d.name for d in UPath(submission_path).glob("*") if d.is_dir()]
+    truth_path = UPath(truth_path)
+    logging.info(f"Volumes: {pred_volumes}")
+    logging.info(f"Truth path: {truth_path}")
+    truth_volumes = [d.name for d in truth_path.glob("*") if d.is_dir()]
+    logging.info(f"Truth volumes: {truth_volumes}")
+
+    # # When called on the commandline, evaluate the submission
+    # # example usage: python evaluate.py submission.zip
+    # argparser = argparse.ArgumentParser()
+    # argparser.add_argument("submission_file", help="Path to submission zip file to score")
+    # argparser.add_argument("result_file", nargs="?", help="If provided, store submission results in this file. Else print them to stdout")
+    # argparser.add_argument("--truth-path", default=TRUTH_PATH, help="Path to zarr containing ground truth")
+    # args = argparser.parse_args()
+
+    # score_submission(args.submission_file, args.result_file, args.truth_path)

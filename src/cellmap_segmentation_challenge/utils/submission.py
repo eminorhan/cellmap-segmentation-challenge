@@ -140,14 +140,7 @@ def zip_submission(zarr_path: str | UPath = SUBMISSION_PATH):
 
 
 def package_crop(crop, zarr_group, overwrite, input_search_path=PROCESSED_PATH):
-    crop_path = (
-        UPath(
-            format_string(
-                input_search_path, {"crop": f"crop{crop.id}", "dataset": crop.dataset}
-            )
-        )
-        / crop.class_label
-    )
+    crop_path = (UPath(format_string(input_search_path, {"crop": f"crop{crop.id}", "dataset": crop.dataset})) / crop.class_label)
     if not crop_path.exists():
         return f"Skipping {crop_path} as it does not exist."
     if f"crop{crop.id}" not in zarr_group:
@@ -155,7 +148,7 @@ def package_crop(crop, zarr_group, overwrite, input_search_path=PROCESSED_PATH):
     else:
         crop_group = zarr_group[f"crop{crop.id}"]
 
-    logging.info(f"Scaling {crop_path} to {crop.voxel_size} nm")
+    print(f"Scaling {crop_path} to {crop.voxel_size} nm and shape {crop.shape}")
     # Match the resolution, spatial position, and shape of the processed volume to the test volume
     image = match_crop_space(
         path=crop_path.path,
@@ -177,7 +170,6 @@ def package_crop(crop, zarr_group, overwrite, input_search_path=PROCESSED_PATH):
     label_array.attrs["voxel_size"] = crop.voxel_size
     label_array.attrs["translation"] = crop.translation
     label_array.attrs["shape"] = crop.shape
-
     return crop_path
 
 
@@ -185,7 +177,7 @@ def package_submission(
     input_search_path: str | UPath = PROCESSED_PATH,
     output_path: str | UPath = SUBMISSION_PATH,
     overwrite: bool = False,
-    max_workers: int = os.cpu_count(),
+    max_workers: int = 2,
 ):
     """
     Package a submission for the CellMap challenge. This will create a zarr file, combining all the processed volumes, and then zip it.

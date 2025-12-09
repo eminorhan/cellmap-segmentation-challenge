@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 from glob import glob
 from typing import Any
@@ -22,7 +23,33 @@ from .utils import load_safe_config, get_test_crops
 from .utils.datasplit import get_formatted_fields, get_raw_path
 
 
-def predict_orthoplanes(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int):
+def find_latest_checkpoint(config):
+    """
+    Finds the latest checkpoint file based on the config.
+    """
+    checkpoint_path = None
+    
+    try:
+        model_name = getattr(config, "model_name", "model")
+        save_path_template = getattr(config, "model_save_path", None)
+        
+        if save_path_template:
+            pattern = save_path_template.format(model_name=model_name, epoch="*")
+            files = glob(pattern)
+            
+            if files:
+                def extract_epoch(f):
+                    match = re.findall(r'(\d+)', os.path.basename(f))
+                    return int(match[-1]) if match else 0
+                
+                checkpoint_path = sorted(files, key=extract_epoch)[-1]
+    except Exception as e:
+        print(f"[Warn] Could not resolve checkpoint path automatically: {e}")
+    
+    return checkpoint_path
+
+
+def predict_orthoplanes(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int, input_array_info):
     print("Predicting orthogonal planes.")
 
     # Make a temporary prediction for each axis
@@ -31,9 +58,7 @@ def predict_orthoplanes(model: torch.nn.Module, dataset_writer_kwargs: dict[str,
     for axis in range(3):
         # Actually slice per axis by permuting singleton dimension
         temp_kwargs = dataset_writer_kwargs.copy()
-        temp_kwargs["target_path"] = os.path.join(
-            tmp_dir.name, "output.zarr", str(axis)
-        )
+        temp_kwargs["target_path"] = os.path.join(tmp_dir.name, "output.zarr", str(axis))
         # Permute input_arrays and target_arrays so singleton is at the current axis
         input_arrays = {k: v.copy() for k, v in temp_kwargs["input_arrays"].items()}
         target_arrays = {k: v.copy() for k, v in temp_kwargs["target_arrays"].items()}
@@ -45,6 +70,7 @@ def predict_orthoplanes(model: torch.nn.Module, dataset_writer_kwargs: dict[str,
             model,
             temp_kwargs,
             batch_size=batch_size,
+            input_array_info=input_array_info
         )
 
     # Get dataset writer for the average of predictions from x, y, and z orthogonal planes
@@ -72,7 +98,11 @@ def predict_orthoplanes(model: torch.nn.Module, dataset_writer_kwargs: dict[str,
 
     # Combine the predictions from the x, y, and z orthogonal planes
     print("Combining predictions.")
-    for batch in tqdm(dataset_writer.loader(batch_size=batch_size), dynamic_ncols=True):
+    # for batch in tqdm(dataset_writer.loader(batch_size=batch_size), dynamic_ncols=True):
+    from torch.utils.data import DataLoader
+    tiled_loader = DataLoader(dataset_writer.blocks, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    for batch in tqdm(tiled_loader, dynamic_ncols=True):    
         # For each class, get the predictions from the x, y, and z orthogonal planes
         outputs = {}
         for array_name, images in single_axis_images.items():
@@ -89,11 +119,11 @@ def predict_orthoplanes(model: torch.nn.Module, dataset_writer_kwargs: dict[str,
 
         # Save the outputs
         dataset_writer[batch["idx"]] = outputs
-
+    print("Combined predictions.")
     tmp_dir.cleanup()
 
 
-def _predict(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int):
+def _predict(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batch_size: int, input_array_info):
     """
     Predicts the output of a model on a large dataset by splitting it into blocks and predicting each block separately.
 
@@ -116,26 +146,57 @@ def _predict(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batc
     )
 
     dataset_writer = CellMapDatasetWriter(**dataset_writer_kwargs, raw_value_transforms=value_transforms)
-    dataloader = dataset_writer.loader(batch_size=batch_size)
+
+    from torch.utils.data import DataLoader
+    dataloader = DataLoader(
+        dataset_writer.blocks, 
+        batch_size=batch_size, 
+        shuffle=False,
+        num_workers=0, 
+        pin_memory=True
+    )
+
+    #dataloader = dataset_writer.loader(batch_size=batch_size)
     model.eval()
+
+    print(f"dataset_writer: {dataset_writer}")
+    print(f"dataset_writer_kwargs len (_predict): {dataset_writer_kwargs}")
+    print(f"dataset_writer.blocks len (_predict): {len(dataset_writer.blocks)}")
+    print(f"dataloader len (_predict): {len(dataloader)}")
+
     # Find singleton dimension if there is one
     # Only the first singleton dimension will be used for squeezing/unsqueezing.
     # If there are multiple singleton dimensions, only the first is handled.
     singleton_dim = np.where([s == 1 for s in dataset_writer_kwargs["input_arrays"]["input"]["shape"]])[0]
     singleton_dim = singleton_dim[0] if singleton_dim.size > 0 else None
+
     with torch.no_grad():
         for batch in tqdm(dataloader, dynamic_ncols=True):
             # Get the inputs and outputs
-            inputs = batch["input"]
+            inputs = batch["input"].to(dataset_writer.device, dtype=torch.bfloat16, non_blocking=True)
+            # print(f"Inputs shape (predict): {inputs.shape}")
             if singleton_dim is not None:
                 # Remove singleton dimension
                 inputs = inputs.squeeze(dim=singleton_dim + 2)
+            # print(f"Inputs shape (predict): {inputs.shape}")
             outputs = model(inputs)
+
+            # Upsample model outputs to be same size as the target (TODO: come up with a more robust way to determine if model is 2D or 3D)
+            if input_array_info["shape"][0] == 1:
+                outputs = torch.nn.functional.interpolate(input=outputs, size=inputs.shape[-2:], mode="bilinear", align_corners=False)
+            else:
+                outputs = torch.nn.functional.interpolate(input=outputs, size=inputs.shape[-3:], mode="trilinear", align_corners=False)
+            
+            # print(f"Outputs shape (predict): {outputs.shape}")
             if singleton_dim is not None:
                 outputs = outputs.unsqueeze(dim=singleton_dim + 2)
-            outputs = {"output": outputs}
+            # print(f"Outputs shape (predict): {outputs.shape}")
+
+            # Cast to float32 before writing. NumPy/Writers don't support BFloat16.
+            outputs = outputs.float()
 
             # Save the outputs
+            outputs = {"output": outputs}
             dataset_writer[batch["idx"]] = outputs
 
 
@@ -143,7 +204,7 @@ def predict(
     config_path: str,
     crops: str = "test",
     output_path: str = PREDICTIONS_PATH,
-    do_orthoplanes: bool = True,
+    do_orthoplanes: bool = False,
     overwrite: bool = False,
     search_path: str = SEARCH_PATH,
     raw_name: str = RAW_NAME,
@@ -173,10 +234,13 @@ def predict(
     """
     config = load_safe_config(config_path)
     classes = config.classes
-    batch_size = getattr(config, "batch_size", 8)
-    input_array_info = getattr(config, "input_array_info", {"shape": (1, 128, 128), "scale": (8, 8, 8)})
-    target_array_info = getattr(config, "target_array_info", input_array_info)
+    batch_size = 2 * config.batch_size  
+    input_array_info = config.input_array_info
+    target_array_info = config.target_array_info
     model = config.model
+
+    print(f"Batch size: {batch_size}")
+    print(f"Input array info: {input_array_info}")
 
     # %% Check that the GPU is available
     if getattr(config, "device", None) is not None:
@@ -189,18 +253,17 @@ def predict(
         device = "cpu"
     print(f"Prediction device: {device}")
 
+    checkpoint_path = find_latest_checkpoint(config)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = checkpoint["model_state_dict"]
+
+    # Load onto model
+    model.load_state_dict(state_dict, strict=True)
+
     # %% Move model to device
-    model = model.to(device)
+    model = model.to(device, dtype=torch.bfloat16)  # we need to cast to bf16 to be able to use FlashAttention-3
 
-    # Optionally, load a pre-trained model
-    checkpoint_epoch = get_model(config)
-    if checkpoint_epoch is not None:
-        print(f"Loaded model checkpoint from epoch: {checkpoint_epoch}")
-
-    if do_orthoplanes and (
-        array_has_singleton_dim(input_array_info)
-        or is_array_2D(input_array_info, summary=any)
-    ):
+    if do_orthoplanes and (array_has_singleton_dim(input_array_info) or is_array_2D(input_array_info, summary=any)):
         # If the model is a 2D model, compute the average of predictions from x, y, and z orthogonal planes
         predict_func = predict_orthoplanes
     else:
@@ -208,9 +271,7 @@ def predict(
 
     input_arrays = {"input": input_array_info}
     target_arrays = {"output": target_array_info}
-    assert (
-        input_arrays is not None and target_arrays is not None
-    ), "No array info provided"
+    assert (input_arrays is not None and target_arrays is not None), "No array info provided"
 
     # Get the crops to predict on
     if crops == "test":
@@ -221,25 +282,13 @@ def predict(
             raw_path = search_path.format(dataset=crop.dataset, name=raw_name)
 
             # Get the boundaries of the crop
-            target_bounds = {
-                "output": {
-                    axis: [
-                        crop.gt_source.translation[i],
-                        crop.gt_source.translation[i]
-                        + crop.gt_source.voxel_size[i] * crop.gt_source.shape[i],
-                    ]
-                    for i, axis in enumerate("zyx")
-                },
-            }
+            target_bounds = {"output": {axis: [crop.gt_source.translation[i], crop.gt_source.translation[i] + crop.gt_source.voxel_size[i] * crop.gt_source.shape[i]] for i, axis in enumerate("zyx")}}
 
             # Create the writer
             dataset_writers.append(
                 {
                     "raw_path": raw_path,
-                    "target_path": output_path.format(
-                        crop=f"crop{crop.id}",
-                        dataset=crop.dataset,
-                    ),
+                    "target_path": output_path.format(crop=f"crop{crop.id}", dataset=crop.dataset),
                     "classes": classes,
                     "input_arrays": input_arrays,
                     "target_arrays": target_arrays,
@@ -256,13 +305,7 @@ def predict(
                 crop = f"crop{crop}"
                 crop_list[i] = crop  # type: ignore
 
-            crop_paths.extend(
-                glob(
-                    search_path.format(
-                        dataset="*", name=crop_name.format(crop=crop, label="")
-                    ).rstrip(os.path.sep)
-                )
-            )
+            crop_paths.extend(glob(search_path.format(dataset="*", name=crop_name.format(crop=crop, label="")).rstrip(os.path.sep)))
 
         dataset_writers = []
         for crop, crop_path in zip(crop_list, crop_paths):  # type: ignore
@@ -287,9 +330,7 @@ def predict(
                 for array_name, image in gt_images.items()
             }
 
-            dataset = get_formatted_fields(raw_path, search_path, ["{dataset}"])[
-                "dataset"
-            ]
+            dataset = get_formatted_fields(raw_path, search_path, ["{dataset}"])["dataset"]
 
             # Create the writer
             dataset_writers.append(
@@ -305,5 +346,11 @@ def predict(
                 }
             )
 
+    print(f"Dataset writers len (predict): {len(dataset_writers)}")
     for dataset_writer in dataset_writers:
-        predict_func(model, dataset_writer, batch_size)
+        print(f"raw_path: {dataset_writer['raw_path']}")
+        print(f"target_path: {dataset_writer['target_path']}")
+        print(f"classes: {dataset_writer['classes']}")
+        print(f"target_bounds: {dataset_writer['target_bounds']['output']}")
+
+        predict_func(model, dataset_writer, batch_size, input_array_info)

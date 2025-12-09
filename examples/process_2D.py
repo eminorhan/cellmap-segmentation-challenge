@@ -1,14 +1,14 @@
 from cellmap_segmentation_challenge.utils import load_safe_config
 
 # Load the configuration file
-config_path = __file__.replace("process", "train")
+#config_path = __file__.replace("process", "train")
+config_path = "/lustre/gale/stf218/scratch/emin/cellmap-segmentation-challenge/examples/train_2D_fsdp.py"
 config = load_safe_config(config_path)
+
 
 # Bring the required configurations into the global namespace
 batch_size = getattr(config, "batch_size", 8)
-input_array_info = getattr(
-    config, "input_array_info", {"shape": (1, 128, 128), "scale": (8, 8, 8)}
-)
+input_array_info = getattr(config, "input_array_info", {"shape": (1, 128, 128), "scale": (8, 8, 8)})
 target_array_info = getattr(config, "target_array_info", input_array_info)
 classes = config.classes
 

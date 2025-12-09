@@ -25,28 +25,18 @@ from dinov3.eval.segmentation.models import build_segmentation_decoder
 
 # %% Set hyperparameters and other configurations
 learning_rate = 3e-4  # learning rate for the optimizer
-batch_size = 128  # batch size for the dataloader
-input_array_info = {"shape": (1, 256, 256), "scale": (8, 8, 8)}  # shape and voxel size of the data to load for the input
-target_array_info = {"shape": (1, 256, 256), "scale": (8, 8, 8)}  # shape and voxel size of the data to load for the target
-epochs = 100  # number of epochs to train the model for
+batch_size = 8  # batch size for the dataloader
+gradient_accumulation_steps = 16  # gradient accumulation steps
+input_array_info = {"shape": (1, 1024, 1024), "scale": (8, 8, 8)}  # shape and voxel size of the data to load for the input
+target_array_info = {"shape": (1, 1024, 1024), "scale": (8, 8, 8)}  # shape and voxel size of the data to load for the target
+epochs = 10  # number of epochs to train the model for
 iterations_per_epoch = 100  # number of iterations per epoch
-warmup_steps = 100  # warmup steps for linear lr decay scheduler 
+warmup_steps = 10  # warmup steps for linear lr decay scheduler 
 random_seed = 42  # random seed for reproducibility
 
 # classes = ["nuc", "er"]  # list of classes to segment
 classes = get_tested_classes()  # list of classes to segment
 print(f"Tested classes ({len(classes)}): {classes}")
-
-# Defining model (comment out all that are not used)
-# 2D UNet
-# model_name = "2d_unet"  # name of the model to use
-# model_to_load = "2d_unet"  # name of the pre-trained model to load
-# model = UNet_2D(1, len(classes))
-
-# # 2D ResNet [uncomment to use]
-# model_name = "2d_resnet"  # name of the model to use
-# model_to_load = "2d_resnet"  # name of the pre-trained model to load
-# model = ResNet(ndims=2, output_nc=len(classes))
 
 # ###### dinov3 model ######
 # change the following vars according to your setup

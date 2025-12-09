@@ -94,7 +94,7 @@ def train(config_path: str):
     model_save_path = getattr(config, "model_save_path", (base_experiment_path / "checkpoints" / "{model_name}_{epoch}.pth").path)
     logs_save_path = getattr(config, "logs_save_path", (base_experiment_path / "tensorboard" / "{model_name}").path)
     datasplit_path = getattr(config, "datasplit_path", (base_experiment_path / "datasplit.csv").path)
-    validation_prob = getattr(config, "validation_prob", 0.15)
+    validation_prob = getattr(config, "validation_prob", 0.01)
     learning_rate = getattr(config, "learning_rate", 0.0001)
     batch_size = getattr(config, "batch_size", 8)
     filter_by_scale = getattr(config, "filter_by_scale", False)
@@ -119,14 +119,8 @@ def train(config_path: str):
     train_raw_value_transforms = getattr(config, "train_raw_value_transforms", T.Compose([T.ToDtype(torch.float), Normalize(), NaNtoNum({"nan": 0, "posinf": None, "neginf": None})]))
     val_raw_value_transforms = getattr(config, "val_raw_value_transforms", T.Compose([T.ToDtype(torch.float), Normalize(), NaNtoNum({"nan": 0, "posinf": None, "neginf": None})]))
     target_value_transforms = getattr(config, "target_value_transforms", T.Compose([T.ToDtype(torch.float), Binarize()]))
-    max_grad_norm = getattr(config, "max_grad_norm", None)
+    max_grad_norm = getattr(config, "max_grad_norm", 1.0)
     force_all_classes = getattr(config, "force_all_classes", "validate")
-
-    # %% Define the optimizer, from the config file or default to RAdam
-    optimizer = getattr(config, "optimizer", torch.optim.AdamW(model.parameters(), lr=learning_rate))
-
-    lr_lambda = lambda step: get_lr_lambda(step, warmup_steps, epochs * iterations_per_epoch)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # %% Define the loss function, from the config file or default to BCEWithLogitsLoss
     criterion = getattr(config, "criterion", torch.nn.BCEWithLogitsLoss)
@@ -218,26 +212,19 @@ def train(config_path: str):
         **config.get("dataloader_kwargs", {}),
     )
 
-    # %% If no model is provided, create a new model
-    if model is None:
-        if "2d" in model_name.lower():
-            if "unet" in model_name.lower():
-                model = UNet_2D(1, len(classes), **model_kwargs)
-            elif "resnet" in model_name.lower():
-                model = ResNet(ndims=2, output_nc=len(classes), **model_kwargs)
-            else:
-                raise ValueError(f"Unknown model name: {model_name}. Preconfigured 2D models are '2d_unet' and '2d_resnet'.")
-        elif "3d" in model_name.lower():
-            if "unet" in model_name.lower():
-                model = UNet_3D(1, len(classes), **model_kwargs)
-            elif "resnet" in model_name.lower():
-                model = ResNet(ndims=3, output_nc=len(classes), **model_kwargs)
-            else:
-                raise ValueError(f"Unknown model name: {model_name}. Preconfigured 3D models are '3d_unet' and '3d_resnet', or 'vitnet'.")
-        elif "vitnet" in model_name.lower():
-            model = ViTVNet(len(classes), **model_kwargs)
-        else:
-            raise ValueError(f"Unknown model name: {model_name}. Preconfigured models are '2d_unet', '2d_resnet', '3d_unet', '3d_resnet', and 'vitnet'. Otherwise provide a custom model as a torch.nn.Module.")
+    # %% Move model to device
+    model = model.to(device)
+    print(f"Model: {model}")
+
+    # %% Define the optimizer, from the config file or default to RAdam
+    optimizer = getattr(config, "optimizer", torch.optim.AdamW(model.parameters(), lr=learning_rate))
+
+    total_train_steps = epochs * iterations_per_epoch
+    lr_lambda = lambda step: get_lr_lambda(step, warmup_steps, total_train_steps)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    config.optimizer = optimizer
+    config.scheduler = scheduler
 
     # Optionally, load a pre-trained model
     checkpoint_epoch = get_model(config)
@@ -251,10 +238,6 @@ def train(config_path: str):
         epochs += checkpoint_epoch
     else:
         n_iter = 0
-
-    # %% Move model to device
-    model = model.to(device)
-    print(f"Model: {model}")
 
     # Deduce number of spatial dimensions
     if "shape" in target_array_info:
@@ -335,22 +318,6 @@ def train(config_path: str):
             # print(f"Outputs shape: {outputs.shape}")
             # print(f"Targets shape: {targets.shape}")
             # print(f"Targets min/max: {torch.nan_to_num(targets, nan=torch.inf).min()}/{torch.nan_to_num(targets, nan=-torch.inf).max()}")
-            # print(f"Targets: {targets[0, :, 0, 0]}")
-            # print(f"Targets: {targets[1, :, 0, 0]}")
-            # print(f"Targets: {targets[2, :, 0, 0]}")
-            # print(f"Targets: {targets[3, :, 0, 0]}")
-            # print(f"Targets: {targets[4, :, 0, 0]}")
-            # print(f"Targets: {targets[5, :, 0, 0]}")
-            # print(f"Targets: {targets[6, :, 0, 0]}")
-            # print(f"Targets: {targets[7, :, 0, 0]}")
-            # print(f"Targets: {targets[0, :, 1, 9]}")
-            # print(f"Targets: {targets[1, :, 100, 10]}")
-            # print(f"Targets: {targets[2, :, 80, 20]}")
-            # print(f"Targets: {targets[3, :, 70, 50]}")
-            # print(f"Targets: {targets[4, :, 60, 30]}")
-            # print(f"Targets: {targets[5, :, 30, 20]}")
-            # print(f"Targets: {targets[6, :, 100, 150]}")
-            # print(f"Targets: {targets[7, :, 150, 190]}")
 
             # Backward pass (compute the gradients)
             loss.backward()
@@ -378,8 +345,16 @@ def train(config_path: str):
             writer.add_scalar("loss", loss.item(), n_iter)
             writer.add_scalar("lr", scheduler.get_last_lr()[0], n_iter)
 
-        # Save the model
-        torch.save(model.state_dict(), format_string(model_save_path, {"epoch": epoch, "model_name": model_name}))
+        # Save model and internal states
+        save_dict = {
+            "step": n_iter,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "model_name": model_name
+        }
+
+        torch.save(save_dict, format_string(model_save_path, {"epoch": epoch, "model_name": model_name}))
 
         # Compute the validation score by averaging the loss across the validation set
         if len(val_loader.loader) > 0:
@@ -423,6 +398,13 @@ def train(config_path: str):
                         targets = {key: batch[key] for key in target_keys}
                     else:
                         targets = batch[target_keys[0]]
+
+                    # Upsample model outputs to be same size as the target (TODO: come up with a more robust way to determine if model is 2D or 3D)
+                    if input_array_info["shape"][0] == 1:
+                        outputs = torch.nn.functional.interpolate(input=outputs, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+                    else:
+                        outputs = torch.nn.functional.interpolate(input=outputs, size=targets.shape[-3:], mode="trilinear", align_corners=False)
+
                     val_score += criterion(outputs, targets).item()
                     i += 1
 
@@ -445,42 +427,41 @@ def train(config_path: str):
                 # Update the progress bar
                 post_fix_dict["Validation"] = f"{val_score:.4f}"
 
-        # Generate and save figures from the last batch of the validation to appear in tensorboard
-        if isinstance(outputs, dict):
-            outputs = list(outputs.values())
-        if len(input_keys) == len(target_keys) != 1:
-            # If the number of input and target keys is the same, assume they are paired
-            for i, (in_key, target_key) in enumerate(zip(input_keys, target_keys)):
-                figs = get_fig_dict(
-                    input_data=batch[in_key],
-                    target_data=batch[target_key],
-                    outputs=outputs[i],
-                    classes=classes,
-                )
-                array_name = longest_common_substring(in_key, target_key)
-                for name, fig in figs.items():
-                    writer.add_figure(f"{name}: {array_name}", fig, n_iter)
-                    plt.close(fig)
+        # # Generate and save figures from the last batch of the validation to appear in tensorboard
+        # if isinstance(outputs, dict):
+        #     outputs = list(outputs.values())
+        # if len(input_keys) == len(target_keys) != 1:
+        #     # If the number of input and target keys is the same, assume they are paired
+        #     for i, (in_key, target_key) in enumerate(zip(input_keys, target_keys)):
+        #         figs = get_fig_dict(
+        #             input_data=batch[in_key],
+        #             target_data=batch[target_key],
+        #             outputs=outputs[i],
+        #             classes=classes,
+        #         )
+        #         array_name = longest_common_substring(in_key, target_key)
+        #         for name, fig in figs.items():
+        #             writer.add_figure(f"{name}: {array_name}", fig, n_iter)
+        #             plt.close(fig)
+        # else:
+        #     # If the number of input and target keys is not the same, assume that only the first input and target keys match
+        #     if isinstance(outputs, list):
+        #         outputs = outputs[0]
+        #     if isinstance(inputs, dict):
+        #         inputs = list(inputs.values())[0]
+        #     elif isinstance(inputs, list):
+        #         inputs = inputs[0]
+        #     if isinstance(targets, dict):
+        #         targets = list(targets.values())[0]
+        #     elif isinstance(targets, list):
+        #         targets = targets[0]
+        #     figs = get_fig_dict(inputs, targets, outputs, classes)
+        #     for name, fig in figs.items():
+        #         writer.add_figure(name, fig, n_iter)
+        #         plt.close(fig)
 
-        else:
-            # If the number of input and target keys is not the same, assume that only the first input and target keys match
-            if isinstance(outputs, list):
-                outputs = outputs[0]
-            if isinstance(inputs, dict):
-                inputs = list(inputs.values())[0]
-            elif isinstance(inputs, list):
-                inputs = inputs[0]
-            if isinstance(targets, dict):
-                targets = list(targets.values())[0]
-            elif isinstance(targets, list):
-                targets = targets[0]
-            figs = get_fig_dict(inputs, targets, outputs, classes)
-            for name, fig in figs.items():
-                writer.add_figure(name, fig, n_iter)
-                plt.close(fig)
-
-        # Clear the GPU memory again
-        torch.cuda.empty_cache()
+        # # Clear the GPU memory again
+        # torch.cuda.empty_cache()
 
     # Close the summarywriter
     writer.close()

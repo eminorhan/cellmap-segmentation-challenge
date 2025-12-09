@@ -82,7 +82,7 @@ def evaluate_cli(submission_path, result_file, truth_path, instance_classes):
     "--max_workers",
     "-w",
     type=click.INT,
-    default=os.cpu_count(),
+    default=2,
     help=f"The maximum number of workers to use for packaging the submission. Defaults to the number of CPUs on the system (currently {os.cpu_count()}).",
 )
 def package_submission_cli(input_search_path, output_path, overwrite, max_workers):

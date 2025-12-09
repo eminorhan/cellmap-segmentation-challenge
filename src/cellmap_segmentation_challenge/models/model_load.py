@@ -12,26 +12,22 @@ from cellmap_segmentation_challenge.utils import get_formatted_fields, format_st
 def get_model(config):
     checkpoint_epoch = None
     model = config.model
+    
+    # if config.optimizer is not None:
+    #     optimizer = config.optimizer
+    # if scheduler.optimizer is not None:
+    #     scheduler = config.scheduler
+
     load_model = getattr(config, "load_model", "latest")
     model_name = getattr(config, "model_name", "model")
     model_to_load = getattr(config, "model_to_load", model_name)
     base_experiment_path = getattr(config, "base_experiment_path", UPath("."))
-    model_save_path = getattr(
-        config,
-        "model_save_path",
-        (base_experiment_path / "checkpoints" / "{model_name}_{epoch}.pth").path,
-    )
-    logs_save_path = getattr(
-        config,
-        "logs_save_path",
-        (base_experiment_path / "tensorboard" / "{model_name}").path,
-    )
+    model_save_path = getattr(config, "model_save_path", (base_experiment_path / "checkpoints" / "{model_name}_{epoch}.pth").path)
+    logs_save_path = getattr(config, "logs_save_path", (base_experiment_path / "tensorboard" / "{model_name}").path)
+
     if load_model.lower() == "latest":
         # Check to see if there are any checkpoints and if so load the latest one
-        checkpoint_epoch = load_latest(
-            format_string(model_save_path, {"model_name": model_to_load}),
-            model,
-        )
+        checkpoint_epoch = load_latest(format_string(model_save_path, {"model_name": model_to_load}), model)
     elif load_model.lower() == "best":
         # Load the checkpoint from the epoch with the best validation score
         checkpoint_epoch = load_best_val(
@@ -69,28 +65,26 @@ def load_latest(search_path, model):
         newest_checkpoint = checkpoint_files[0]
 
         # Extract the epoch from the filename
-        epoch = int(
-            get_formatted_fields(newest_checkpoint, search_path, ["{epoch}"])["epoch"]
-        )
+        epoch = int(get_formatted_fields(newest_checkpoint, search_path, ["{epoch}"])["epoch"])
+        newest_checkpoint = torch.load(newest_checkpoint)
 
         # Loads the most recent checkpoint into the model and prints out the file path
         try:
-            model.load_state_dict(
-                torch.load(newest_checkpoint, weights_only=True), strict=False
-            )
-            print(f"Loaded latest checkpoint: {newest_checkpoint}")
+            model.load_state_dict(newest_checkpoint['model_state_dict'], strict=True)
+            # optimizer.load_state_dict(newest_checkpoint['optimizer_state_dict'])
+            # scheduler.load_state_dict(newest_checkpoint['scheduler_state_dict'])
+
+            print(f"Loaded latest checkpoint: {checkpoint_files[0]}")
             return epoch
         except Exception as e:
-            print(f"Error loading checkpoint: {newest_checkpoint}")
+            print(f"Error loading checkpoint: {checkpoint_files[0]}")
             print(e)
 
     # If there are no checkpoints, or an error occurs, return None
     return None
 
 
-def load_best_val(
-    logs_save_path, model_save_path, model, low_is_best=True, smoothing_window: int = 1
-):
+def load_best_val(logs_save_path, model_save_path, model, low_is_best=True, smoothing_window: int = 1):
     """
     Load the model weights with the best validation score from a directory into an existing model object in place.
 
@@ -113,9 +107,7 @@ def load_best_val(
         smoothing_window=smoothing_window,
     )
     if best_epoch == 0:
-        print(
-            "Training did not improve the model, skipping loading best validation checkpoint"
-        )
+        print("Training did not improve the model, skipping loading best validation checkpoint")
     elif best_epoch is not None:
         # Load the model with the best validation score
         checkpoint_path = UPath(model_save_path.format(epoch=best_epoch)).path
@@ -173,10 +165,7 @@ def get_best_val_epoch(logs_save_path, low_is_best=True, smoothing_window: int =
                 (smoothing_window // 2, smoothing_window // 2),
                 mode="replicate",
             )
-            smoothed_scores = torch.nn.functional.conv1d(
-                scores,
-                kernel,
-            ).squeeze()
+            smoothed_scores = torch.nn.functional.conv1d(scores, kernel).squeeze()
         else:
             smoothed_scores = scores
 
@@ -215,11 +204,7 @@ def get_latest_checkpoint_epoch(model_save_path):
         newest_checkpoint = checkpoint_files[0]
 
         # Extract the epoch from the filename
-        epoch = int(
-            get_formatted_fields(newest_checkpoint, model_save_path, ["{epoch}"])[
-                "epoch"
-            ]
-        )
+        epoch = int(get_formatted_fields(newest_checkpoint, model_save_path, ["{epoch}"])["epoch"])
         return epoch
 
     # If there are no checkpoints, return None
