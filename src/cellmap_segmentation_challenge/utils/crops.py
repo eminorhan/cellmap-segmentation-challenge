@@ -24,11 +24,7 @@ ZIP_MANIFEST_URL = os.environ.get(
 )
 
 
-def fetch_manifest(
-    url: str | URL,
-    file_name: str,
-    object: Self,
-) -> tuple[str, ...]:
+def fetch_manifest(url: str | URL, file_name: str, object: Self) -> tuple[str, ...]:
     local_path = UPath(__file__).parent / file_name
     # Attempt to download the manifest file
     try:
@@ -40,13 +36,9 @@ def fetch_manifest(
             dst.write(src.read())
     except:
         if local_path.exists():
-            print(
-                f"Failed to download manifest file from {url}, using local file {local_path}."
-            )
+            print(f"Failed to download manifest file from {url}, using local file {local_path}.")
         else:
-            raise FileNotFoundError(
-                f"Failed to download manifest file from {url} and no local file exists."
-            )
+            raise FileNotFoundError(f"Failed to download manifest file from {url} and no local file exists.")
 
     fs, path = fsspec.url_to_fs(str(local_path))
     head, *rows = fs.cat_file(path).decode().splitlines()
@@ -78,9 +70,7 @@ class TestCropRow:
         )
 
 
-def fetch_test_crop_manifest(
-    url: str | URL = TEST_CROP_MANIFEST_URL,
-) -> tuple[TestCropRow, ...]:
+def fetch_test_crop_manifest(url: str | URL = TEST_CROP_MANIFEST_URL) -> tuple[TestCropRow, ...]:
     """
     Fetch a test manifest file from a URL and return a tuple of TestCropRow objects.
 
@@ -95,6 +85,27 @@ def fetch_test_crop_manifest(
         A tuple of TestCropRow objects.
     """
     return fetch_manifest(url, "test_crop_manifest.csv", TestCropRow)
+
+
+def fetch_validation_crop_manifest() -> tuple[TestCropRow, ...]:
+    """
+    Fetch a test manifest file from a URL and return a tuple of TestCropRow objects.
+
+    Parameters
+    ----------
+    url : str or yarl.URL
+        The URL to the manifest file.
+
+    Returns
+    -------
+    tuple[TestCropRow, ...]
+        A tuple of TestCropRow objects.
+    """
+    local_path = UPath(__file__).parent / "validation_crop_manifest.csv"
+    fs, path = fsspec.url_to_fs(str(local_path))
+    head, *rows = fs.cat_file(path).decode().splitlines()
+    return tuple(TestCropRow.from_csv_row(row) for row in rows)
+
 
 
 @dataclass
@@ -171,29 +182,20 @@ TEST_CROPS_DICT = {(crop.id, crop.class_label): crop for crop in TEST_CROPS}
 
 
 def get_test_crops() -> tuple[CropRow, ...]:
+
     _test_crops = fetch_test_crop_manifest()
-    dataset_em_meta = {
-        crop.dataset: {"em_url": crop.em_url, "alignment": crop.alignment}
-        for crop in fetch_crop_manifest()
-    }
+    dataset_em_meta = {crop.dataset: {"em_url": crop.em_url, "alignment": crop.alignment} for crop in fetch_crop_manifest()}
     test_crops = []
     test_crop_meta_by_id = {}
+    
     for test_crop in _test_crops:
         if test_crop.id in test_crop_meta_by_id:
             # Make sure metadata for highest resolution, smallest offset, and largest shape is kept
             listed = test_crop_meta_by_id[test_crop.id]
-            new_voxel_size = (
-                min(l_vs, t_vs)
-                for l_vs, t_vs in zip(listed.voxel_size, test_crop.voxel_size)
-            )
-            new_translation = (
-                min(l_trans, t_trans)
-                for l_trans, t_trans in zip(listed.translation, test_crop.translation)
-            )
-            new_shape = (
-                max(l_shape, t_shape)
-                for l_shape, t_shape in zip(listed.shape, test_crop.shape)
-            )
+            new_voxel_size = (min(l_vs, t_vs) for l_vs, t_vs in zip(listed.voxel_size, test_crop.voxel_size))
+            new_translation = (min(l_trans, t_trans) for l_trans, t_trans in zip(listed.translation, test_crop.translation))
+            new_shape = (max(l_shape, t_shape) for l_shape, t_shape in zip(listed.shape, test_crop.shape))
+
             new_test_crop = TestCropRow(
                 test_crop.id,
                 test_crop.dataset,
@@ -215,6 +217,47 @@ def get_test_crops() -> tuple[CropRow, ...]:
             dataset_em_meta[test_crop.dataset]["em_url"],
         )
         test_crops.append(new_crop)
+
+    return tuple(test_crops)
+
+
+def get_validation_crops() -> tuple[CropRow, ...]:
+
+    _test_crops = fetch_validation_crop_manifest()
+    dataset_em_meta = {crop.dataset: {"em_url": crop.em_url, "alignment": crop.alignment} for crop in fetch_crop_manifest()}
+    test_crops = []
+    test_crop_meta_by_id = {}
+    
+    for test_crop in _test_crops:
+        if test_crop.id in test_crop_meta_by_id:
+            # Make sure metadata for highest resolution, smallest offset, and largest shape is kept
+            listed = test_crop_meta_by_id[test_crop.id]
+            new_voxel_size = (min(l_vs, t_vs) for l_vs, t_vs in zip(listed.voxel_size, test_crop.voxel_size))
+            new_translation = (min(l_trans, t_trans) for l_trans, t_trans in zip(listed.translation, test_crop.translation))
+            new_shape = (max(l_shape, t_shape) for l_shape, t_shape in zip(listed.shape, test_crop.shape))
+
+            new_test_crop = TestCropRow(
+                test_crop.id,
+                test_crop.dataset,
+                "validate",
+                tuple(new_voxel_size),
+                tuple(new_translation),
+                tuple(new_shape),
+            )
+            test_crop_meta_by_id[test_crop.id] = new_test_crop
+        else:
+            test_crop_meta_by_id[test_crop.id] = test_crop
+
+    for id, test_crop in test_crop_meta_by_id.items():
+        new_crop = CropRow(
+            id,
+            test_crop.dataset,
+            dataset_em_meta[test_crop.dataset]["alignment"],
+            test_crop,
+            dataset_em_meta[test_crop.dataset]["em_url"],
+        )
+        test_crops.append(new_crop)
+        
     return tuple(test_crops)
 
 

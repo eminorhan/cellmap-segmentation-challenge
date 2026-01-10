@@ -3,9 +3,9 @@
 # Imports
 from cellmap_segmentation_challenge.predict_fsdp import predict as predict_fsdp
 
-config_path = "/lustre/gale/stf218/scratch/emin/cellmap-segmentation-challenge/examples/train_2D_fsdp.py"
+config_path = "/lustre/blizzard/stf218/scratch/emin/cellmap-segmentation-challenge/examples/train_2D_fsdp.py"
 
 # Overwrite the predictions if they already exist
-predict_fsdp(config_path, crops="test", overwrite=True)
+predict_fsdp(config_path, crops="validation", overwrite=True)
 
 # %%

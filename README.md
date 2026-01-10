@@ -1,5 +1,9 @@
 <img src="https://raw.githubusercontent.com/janelia-cellmap/dacapo/main/docs/source/_static/CellMapLogo.png" alt="CellMap logo" width="85%">
 
+Data download:
+```bash
+csc fetch-data --raw-padding 128 --fetch-all-em-resolutions --batch-size 1024 --num-workers 64
+```
 # CellMap Segmentation Challenge
 
 Welcome to the [**CellMap Segmentation Challenge**](https://janelia.figshare.com/articles/online_resource/CellMap_Segmentation_Challenge/28034561/1?file=51215543) toolbox!

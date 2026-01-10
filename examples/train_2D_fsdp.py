@@ -10,24 +10,25 @@ from dinov3.eval.segmentation.models import build_segmentation_decoder
 
 # %% Set hyperparameters
 learning_rate = 3e-5
-batch_size = 8  # batch size per GPU
+batch_size = 2  # batch size per GPU
 gradient_accumulation_steps = 1
-input_array_info = {"shape": (1, 1024, 1024), "scale": (32, 32, 32)}
-target_array_info = {"shape": (1, 1024, 1024), "scale": (32, 32, 32)}
-epochs = 9
-iterations_per_epoch = 150
-warmup_steps = 150
-random_seed = 42
+input_array_info = {"shape": (1, 1024, 1024), "scale": (8, 8, 8)}
+target_array_info = {"shape": (1, 1024, 1024), "scale": (8, 8, 8)}
+epochs = 16
+iterations_per_epoch = 100
+log_steps = 100
+warmup_steps = 100
+# random_seed = 42
 
 classes = get_tested_classes()
 
 # ###### dinov3 model ######
-TORCH_HUB_PATH = "/lustre/gale/stf218/scratch/emin/torch_hub"
-DINOV3_REPO_PATH = "/lustre/gale/stf218/scratch/emin/dinov3"
+TORCH_HUB_PATH = "/lustre/blizzard/stf218/scratch/emin/torch_hub"
+DINOV3_REPO_PATH = "/lustre/blizzard/stf218/scratch/emin/dinov3"
 
 torch.hub.set_dir(TORCH_HUB_PATH)
 
-model_name = "dinov3_vitl16_linear"
+model_name = "dinov3_vitl16_linear_10node"
 
 # We construct the model here.
 # NOTE: For FSDP, do not move the model to .cuda() here. The training script handles device placement.

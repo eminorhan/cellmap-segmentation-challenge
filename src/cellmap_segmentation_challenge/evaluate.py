@@ -424,14 +424,10 @@ def score_label(
 
     # Compute the scores
     if label_name in instance_classes:
-        logging.info(
-            f"Starting an instance evaluation for {label_name} in {crop_name}..."
-        )
+        logging.info(f"Starting an instance evaluation for {label_name} in {crop_name}...")
         timer = time()
         results = score_instance(pred_label, truth_label, crop.voxel_size)
-        logging.info(
-            f"Finished instance evaluation for {label_name} in {crop_name} in {time() - timer:.2f} seconds..."
-        )
+        logging.info(f"Finished instance evaluation for {label_name} in {crop_name} in {time() - timer:.2f} seconds...")
     else:
         results = score_semantic(pred_label, truth_label)
     results["num_voxels"] = int(np.prod(truth_label.shape))
@@ -440,9 +436,7 @@ def score_label(
     return crop_name, label_name, results
 
 
-def empty_label_score(
-    label, crop_name, instance_classes=INSTANCE_CLASSES, truth_path=TRUTH_PATH
-):
+def empty_label_score(label, crop_name, instance_classes=INSTANCE_CLASSES, truth_path=TRUTH_PATH):
     if label in instance_classes:
         return {
             "accuracy": 0,
@@ -501,14 +495,10 @@ def get_evaluation_args(
         truth_path = UPath(truth_path)
 
         # Find labels to score
-        pred_labels = [
-            a for a in zarr.open(pred_volume_path.path, mode="r").array_keys()
-        ]
+        pred_labels = [a for a in zarr.open(pred_volume_path.path, mode="r").array_keys()]
 
         crop_name = pred_volume_path.name
-        truth_labels = [
-            a for a in zarr.open((truth_path / crop_name).path, mode="r").array_keys()
-        ]
+        truth_labels = [a for a in zarr.open((truth_path / crop_name).path, mode="r").array_keys()]
 
         found_labels = list(set(pred_labels) & set(truth_labels))
         missing_labels = list(set(truth_labels) - set(pred_labels))
@@ -531,9 +521,7 @@ def get_evaluation_args(
     return score_label_arglist
 
 
-def missing_volume_score(
-    truth_volume_path, instance_classes=INSTANCE_CLASSES
-) -> dict[str, dict[str, float]]:
+def missing_volume_score(truth_volume_path, instance_classes=INSTANCE_CLASSES) -> dict[str, dict[str, float]]:
     """
     Score a missing volume as 0's, congruent with the score_volume function.
 
@@ -563,21 +551,15 @@ def missing_volume_score(
                 "num_voxels": int(
                     np.prod(zarr.open((truth_volume_path / label).path, mode="r").shape)
                 ),
-                "voxel_size": zarr.open(
-                    (truth_volume_path / label).path, mode="r"
-                ).attrs["voxel_size"],
+                "voxel_size": zarr.open((truth_volume_path / label).path, mode="r").attrs["voxel_size"],
                 "is_missing": True,
             }
             if label in instance_classes
             else {
                 "iou": 0.0,
                 "dice_score": 0.0,
-                "num_voxels": int(
-                    np.prod(zarr.open((truth_volume_path / label).path, mode="r").shape)
-                ),
-                "voxel_size": zarr.open(
-                    (truth_volume_path / label).path, mode="r"
-                ).attrs["voxel_size"],
+                "num_voxels": int(np.prod(zarr.open((truth_volume_path / label).path, mode="r").shape)),
+                "voxel_size": zarr.open((truth_volume_path / label).path, mode="r").attrs["voxel_size"],
                 "is_missing": True,
             }
         )
@@ -744,20 +726,13 @@ def score_submission(
     found_volumes = list(set(pred_volumes) & set(truth_volumes))
     missing_volumes = list(set(truth_volumes) - set(pred_volumes))
     if len(found_volumes) == 0:
-        raise ValueError(
-            "No volumes found to score. Make sure the submission is formatted correctly."
-        )
+        raise ValueError("No volumes found to score. Make sure the submission is formatted correctly.")
     logging.info(f"Scoring volumes: {found_volumes}")
     if len(missing_volumes) > 0:
         logging.info(f"Missing volumes: {missing_volumes}")
         logging.info("Scoring missing volumes as 0's")
 
-    scores = {
-        volume: missing_volume_score(
-            truth_path / volume, instance_classes=instance_classes
-        )
-        for volume in missing_volumes
-    }
+    scores = {volume: missing_volume_score(truth_path / volume, instance_classes=instance_classes) for volume in missing_volumes}
 
     # Get all prediction paths to evaluate
     evaluation_args = get_evaluation_args(
@@ -778,12 +753,8 @@ def score_submission(
             scores[crop_name][label_name] = result
 
         # Combine label scores across volumes, normalizing by the number of voxels
-        all_scores = combine_scores(
-            scores, include_missing=True, instance_classes=instance_classes
-        )
-        found_scores = combine_scores(
-            scores, include_missing=False, instance_classes=instance_classes
-        )
+        all_scores = combine_scores(scores, include_missing=True, instance_classes=instance_classes)
+        found_scores = combine_scores(scores, include_missing=False, instance_classes=instance_classes)
 
         # Save the scores
         if result_file:
@@ -791,17 +762,11 @@ def score_submission(
             with open(result_file, "w") as f:
                 json.dump(all_scores, f, indent=4)
 
-            found_result_file = str(result_file).replace(
-                UPath(result_file).suffix, "_submitted_only" + UPath(result_file).suffix
-            )
-            logging.info(
-                f"Saving scores for only submitted data to {found_result_file}..."
-            )
+            found_result_file = str(result_file).replace(UPath(result_file).suffix, "_submitted_only" + UPath(result_file).suffix)
+            logging.info(f"Saving scores for only submitted data to {found_result_file}...")
             with open(found_result_file, "w") as f:
                 json.dump(found_scores, f, indent=4)
-            logging.info(
-                f"Scores saved to {result_file} and {found_result_file} in {time() - start_time:.2f} seconds"
-            )
+            logging.info(f"Scores saved to {result_file} and {found_result_file} in {time() - start_time:.2f} seconds")
         else:
             return all_scores
     else:
@@ -823,26 +788,16 @@ def score_submission(
             leave=True,
         ):
             results.append(future.result())
-            all_scores, found_scores = update_scores(
-                scores, results, result_file, instance_classes=instance_classes
-            )
+            all_scores, found_scores = update_scores(scores, results, result_file, instance_classes=instance_classes)
 
     logging.info("Scores combined across all test volumes:")
-    logging.info(
-        f"\tOverall Instance Score: {all_scores['overall_instance_score']:.4f}"
-    )
-    logging.info(
-        f"\tOverall Semantic Score: {all_scores['overall_semantic_score']:.4f}"
-    )
+    logging.info(f"\tOverall Instance Score: {all_scores['overall_instance_score']:.4f}")
+    logging.info(f"\tOverall Semantic Score: {all_scores['overall_semantic_score']:.4f}")
     logging.info(f"\tOverall Score: {all_scores['overall_score']:.4f}")
 
     logging.info("Scores combined across test volumes with data submitted:")
-    logging.info(
-        f"\tOverall Instance Score: {found_scores['overall_instance_score']:.4f}"
-    )
-    logging.info(
-        f"\tOverall Semantic Score: {found_scores['overall_semantic_score']:.4f}"
-    )
+    logging.info(f"\tOverall Instance Score: {found_scores['overall_instance_score']:.4f}")
+    logging.info(f"\tOverall Semantic Score: {found_scores['overall_semantic_score']:.4f}")
     logging.info(f"\tOverall Score: {found_scores['overall_score']:.4f}")
     logging.info(f"Submission scored in {time() - start_time:.2f} seconds")
 

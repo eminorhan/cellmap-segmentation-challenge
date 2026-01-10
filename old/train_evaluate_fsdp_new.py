@@ -5,6 +5,11 @@ import functools
 import argparse
 import glob
 import re
+import csv
+import shutil
+import tempfile
+import json
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -19,6 +24,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from torch.utils.data import DistributedSampler
 
+from cellmap_data import CellMapImage  # <--- Added Import
 from cellmap_data.utils import get_fig_dict, longest_common_substring
 from cellmap_data.transforms.augment import NaNtoNum, Binarize
 from tensorboardX import SummaryWriter
@@ -33,6 +39,14 @@ from cellmap_segmentation_challenge.utils import (
     make_datasplit_csv,
     make_s3_datasplit_csv,
     format_string,
+)
+
+# Imports for Prediction and Evaluation
+from cellmap_segmentation_challenge.predict_fsdp import _predict
+from cellmap_segmentation_challenge.evaluate import (
+    score_label,
+    combine_scores,
+    INSTANCE_CLASSES,
 )
 
 
@@ -88,6 +102,180 @@ def find_latest_checkpoint(save_dir, model_name):
     return checkpoints[0][1] # Return path of highest epoch
 
 
+def run_final_validation(
+    model,
+    datasplit_path,
+    input_array_info,
+    target_array_info,
+    classes,
+    local_rank,
+    batch_size,
+    output_dir=None
+):
+    """
+    Runs inference on the validation set defined in datasplit.csv and scores the results.
+    """
+    is_rank0 = dist.get_rank() == 0
+    
+    if is_rank0:
+        print("\n" + "="*40)
+        print("STARTING FINAL VALIDATION SCORING")
+        print("="*40)
+
+    # 1. Parse datasplit.csv to find validation volumes
+    val_entries = []
+    if os.path.exists(datasplit_path):
+        with open(datasplit_path, 'r') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 5 and row[0] == "validate":
+                    # Row format: split, raw_zarr, raw_ds, gt_zarr, gt_ds_with_classes
+                    raw_zarr, raw_ds = row[1], row[2]
+                    gt_zarr, gt_ds_raw = row[3], row[4]
+                    
+                    if "[" in gt_ds_raw:
+                        gt_ds = gt_ds_raw.split("[")[0].rstrip("/")
+                    else:
+                        gt_ds = gt_ds_raw
+                    
+                    crop_name = os.path.basename(gt_ds)
+                    if not crop_name.startswith("crop"):
+                        crop_name = f"val_{len(val_entries)}"
+
+                    val_entries.append({
+                        "raw_path": str(UPath(raw_zarr) / raw_ds),
+                        "gt_path": str(UPath(gt_zarr) / gt_ds),
+                        "gt_root": str(UPath(gt_zarr) / os.path.dirname(gt_ds)), 
+                        "crop_name": crop_name
+                    })
+
+    if not val_entries:
+        if is_rank0:
+            print("No validation entries found in datasplit.csv. Skipping scoring.")
+        return
+
+    # 2. Setup Temporary Directory for Predictions
+    if output_dir is None:
+        temp_dir_obj = tempfile.TemporaryDirectory(prefix="fsdp_val_preds_", dir=os.getcwd())
+        temp_pred_path = temp_dir_obj.name
+    else:
+        temp_pred_path = output_dir
+        temp_dir_obj = None
+
+    if is_rank0:
+        print(f"Generating validation predictions in: {temp_pred_path}")
+
+    if is_rank0:
+        os.makedirs(temp_pred_path, exist_ok=True)
+    dist.barrier(device_ids=[local_rank])
+
+    # 3. Run Inference
+    input_arrays = {"input": input_array_info}
+    target_arrays = {"output": target_array_info} 
+
+    for entry in val_entries:
+        crop_pred_path = os.path.join(temp_pred_path, entry["crop_name"])
+        
+        if is_rank0:
+            print(f"Predicting {entry['crop_name']}...")
+        
+        # --- FIX START: Calculate target_bounds from Ground Truth ---
+        target_bounds = None
+        # Try finding a class that exists in the GT to reference bounds from
+        for cls in classes:
+            ref_path = UPath(entry["gt_path"]) / cls
+            if ref_path.exists():
+                try:
+                    # We instantiate CellMapImage to get the bounding box consistent with the requested scale
+                    ref_img = CellMapImage(
+                        str(ref_path),
+                        target_class=cls,
+                        target_scale=input_array_info.get("scale", None),
+                        target_voxel_shape=input_array_info.get("shape", None)
+                    )
+                    target_bounds = {"output": ref_img.bounding_box}
+                    break
+                except Exception:
+                    continue
+        
+        if target_bounds is None:
+             if is_rank0: 
+                 print(f"[Warning] Skipping {entry['crop_name']}: Could not find any ground truth class {classes} at {entry['gt_path']} to calculate bounds.")
+             continue
+        # --- FIX END ---
+
+        dataset_writer_kwargs = {
+            "raw_path": entry["raw_path"],
+            "target_path": crop_pred_path,
+            "classes": classes,
+            "input_arrays": input_arrays,
+            "target_arrays": target_arrays,
+            "target_bounds": target_bounds,  # <--- Now passing target_bounds
+            "overwrite": True,
+            "device": f"cuda:{local_rank}",
+        }
+        
+        # Run distributed prediction
+        _predict(model, dataset_writer_kwargs, batch_size, input_array_info)
+        
+        dist.barrier(device_ids=[local_rank])
+
+    # 4. Score Predictions (Rank 0 Only)
+    if is_rank0:
+        print("Predictions complete. Calculating metrics...")
+        scores = {}
+        
+        for entry in val_entries:
+            crop_name = entry["crop_name"]
+            pred_volume_path = UPath(temp_pred_path) / crop_name / "output"
+            truth_root = UPath(entry["gt_root"])
+
+            crop_scores = {}
+            for label in classes:
+                try:
+                    _, _, result = score_label(
+                        pred_label_path=pred_volume_path / label,
+                        label_name=label,
+                        crop_name=crop_name,
+                        truth_path=truth_root,
+                        instance_classes=INSTANCE_CLASSES
+                    )
+                    crop_scores[label] = result
+                except Exception as e:
+                    # Silence errors for missing labels (common in sparsely annotated crops)
+                    pass
+            
+            if crop_scores:
+                scores[crop_name] = crop_scores
+
+        # 5. Combine and Print Scores
+        if scores:
+            try:
+                final_scores = combine_scores(scores, include_missing=False, instance_classes=INSTANCE_CLASSES)
+                
+                print("\n" + "="*40)
+                print("FINAL VALIDATION RESULTS")
+                print("="*40)
+                print(f"Overall Instance Score: {final_scores.get('overall_instance_score', 0):.4f}")
+                print(f"Overall Semantic Score: {final_scores.get('overall_semantic_score', 0):.4f}")
+                print(f"Overall Geometric Mean: {final_scores.get('overall_score', 0):.4f}")
+                print("-" * 40)
+                
+                if "label_scores" in final_scores:
+                    print("Per Class Scores:")
+                    print(json.dumps(final_scores["label_scores"], indent=2))
+            except Exception as e:
+                print(f"Error combining scores: {e}")
+        else:
+            print("No scores computed.")
+
+    # 6. Cleanup
+    dist.barrier(device_ids=[local_rank])
+    if is_rank0 and temp_dir_obj:
+        print("Cleaning up temporary prediction files...")
+        temp_dir_obj.cleanup()
+
+
 def train(config_path: str):
     """
     Train a model using FSDP. Resumes from the latest checkpoint if available.
@@ -109,12 +297,11 @@ def train(config_path: str):
     base_experiment_path = UPath(base_experiment_path)
     
     # Define paths
-    # Note: model_save_path is a template string e.g., ".../{model_name}_{epoch}.pth"
     model_save_path_template = getattr(config, "model_save_path", (base_experiment_path / "checkpoints" / "{model_name}_{epoch}.pth").path)
     logs_save_path = getattr(config, "logs_save_path", (base_experiment_path / "tensorboard" / "{model_name}").path)
     datasplit_path = getattr(config, "datasplit_path", (base_experiment_path / "datasplit.csv").path)
     
-    validation_prob = getattr(config, "validation_prob", 0.01)
+    validation_prob = getattr(config, "validation_prob", 0.1)
     learning_rate = getattr(config, "learning_rate", 0.0001)
     batch_size = getattr(config, "batch_size", 8)
     filter_by_scale = getattr(config, "filter_by_scale", False)
@@ -123,7 +310,7 @@ def train(config_path: str):
     epochs = getattr(config, "epochs", 1000)
     iterations_per_epoch = getattr(config, "iterations_per_epoch", 1000)
     warmup_steps = getattr(config, "warmup_steps", 100)
-    # random_seed = getattr(config, "random_seed", 1)
+    random_seed = getattr(config, "random_seed", 1)
     classes = getattr(config, "classes", ["nuc", "er"])
     model_name = getattr(config, "model_name", "2d_unet")
     model = getattr(config, "model", None)
@@ -158,11 +345,11 @@ def train(config_path: str):
         if len(os.path.dirname(datasplit_path)) > 0:
             os.makedirs(os.path.dirname(datasplit_path), exist_ok=True)
 
-    # # %% Set the random seed
-    # torch.manual_seed(random_seed)
-    # np.random.seed(random_seed)
-    # random.seed(random_seed)
-    # torch.cuda.manual_seed(random_seed)
+    # %% Set the random seed
+    torch.manual_seed(random_seed)
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    torch.cuda.manual_seed(random_seed)
 
     if is_rank0:
         print(f"Training on {world_size} GPUs using FSDP.")
@@ -289,33 +476,25 @@ def train(config_path: str):
             print(f"Resuming training from checkpoint: {resume_path}")
         
         # Load checkpoint on CPU to avoid VRAM spikes
-        # All ranks load the checkpoint so they can access the full optimizer state
         checkpoint = torch.load(resume_path, map_location="cpu")
         
-        # 1. Load Model State
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT):
             model.load_state_dict(checkpoint["model_state_dict"])
         
-        # 2. Load Optimizer State
-        # The checkpoint contains the FULL optimizer state. We must scatter it 
-        # to the local shard for this specific rank.
         if "optimizer_state_dict" in checkpoint:
             full_osd = checkpoint["optimizer_state_dict"]
             sharded_osd = FSDP.scatter_full_optim_state_dict(full_osd, model)
             optimizer.load_state_dict(sharded_osd)
-            del full_osd # Free memory
+            del full_osd 
         elif is_rank0:
             print("Warning: Optimizer state not found in checkpoint. Optimizer initialized from scratch.")
 
-        # 3. Load Scheduler
         if "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         
-        # 4. Restore Metadata
         if "epoch" in checkpoint:
             start_epoch = checkpoint["epoch"] + 1
         else:
-            # Fallback regex if epoch not in dict
             match = re.search(r"_(\d+)\.pth$", resume_path)
             if match:
                 start_epoch = int(match.group(1)) + 1
@@ -347,11 +526,6 @@ def train(config_path: str):
 
     input_keys = list(train_loader.dataset.input_arrays.keys())
     target_keys = list(train_loader.dataset.target_arrays.keys())
-    print(f"Train input keys: {input_keys}; target keys: {target_keys}")
-
-    val_input_keys = list(val_loader.dataset.input_arrays.keys())
-    val_target_keys = list(val_loader.dataset.target_arrays.keys())
-    print(f"Val input keys: {input_keys}; target keys: {target_keys}")
 
     # %% Tensorboard (Rank 0 only)
     writer = None
@@ -402,7 +576,6 @@ def train(config_path: str):
             context = model.no_sync() if is_accumulating else torch.enable_grad()
 
             with context:
-                # print(f"Inputs shape: {inputs.shape}")
                 outputs = model(inputs)
 
                 if input_array_info["shape"][0] == 1:
@@ -413,7 +586,6 @@ def train(config_path: str):
                 loss = criterion(outputs, targets) / gradient_accumulation_steps
                 loss.backward()
             
-            # Accumulate loss
             running_loss += loss.item() * gradient_accumulation_steps
             steps_in_log += 1
 
@@ -427,7 +599,7 @@ def train(config_path: str):
 
             if is_rank0 and steps_in_log >= log_steps:
                 avg_loss = running_loss / steps_in_log
-                print(f"Epoch {epoch} | Step {n_iter} | Loss: {avg_loss:.6f} | Lr: {scheduler.get_last_lr()[0]:.6f}")
+                print(f"Epoch {epoch} | Step {n_iter} | Loss: {avg_loss:.6f} | lr: {scheduler.get_last_lr()[0]:.6f}")
                 
                 writer.add_scalar("loss", avg_loss, n_iter)
                 writer.add_scalar("lr", scheduler.get_last_lr()[0], n_iter)
@@ -436,12 +608,10 @@ def train(config_path: str):
                 steps_in_log = 0
 
         # %% Save Checkpoint
-        # Use FULL_STATE_DICT to make resuming easier, but offload to CPU
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
             cpu_model_state = model.state_dict()
-            # Important: Gather full optimizer state for resuming on different topology
             cpu_optim_state = FSDP.full_optim_state_dict(model, optimizer)
             
             if is_rank0:
@@ -515,6 +685,17 @@ def train(config_path: str):
 
     if is_rank0:
         writer.close()
+    
+    # %% Final Evaluation on Validation Set
+    run_final_validation(
+        model=model,
+        datasplit_path=datasplit_path,
+        input_array_info=input_array_info,
+        target_array_info=target_array_info,
+        classes=classes,
+        local_rank=local_rank,
+        batch_size=batch_size
+    )
     
     cleanup()
 

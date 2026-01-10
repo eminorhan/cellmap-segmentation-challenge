@@ -27,13 +27,13 @@ from cellmap_data.utils import (
     is_array_2D,
     permute_singleton_dimension,
 )
-from cellmap_data.transforms.augment import NaNtoNum, Normalize
+from cellmap_data.transforms.augment import NaNtoNum
 from tqdm import tqdm
 from upath import UPath
 
 # Use relative imports assuming this file is placed alongside the original predict.py
 from .config import CROP_NAME, PREDICTIONS_PATH, RAW_NAME, SEARCH_PATH
-from .utils import load_safe_config, get_test_crops
+from .utils import load_safe_config, get_test_crops, get_validation_crops
 from .utils.datasplit import get_formatted_fields, get_raw_path
 
 
@@ -278,7 +278,7 @@ def _predict(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batc
     value_transforms = T.Compose(
         [
             T.ToDtype(torch.float, scale=True),
-            Normalize(),
+            T.Normalize(mean=[0.449,], std=[0.226,]),
             NaNtoNum({"nan": 0, "posinf": None, "neginf": None}),
         ],
     )
@@ -370,7 +370,7 @@ def _predict(model: torch.nn.Module, dataset_writer_kwargs: dict[str, Any], batc
 
 def predict(
     config_path: str,
-    crops: str = "test",
+    crops: str = "validation",
     output_path: str = PREDICTIONS_PATH,
     do_orthoplanes: bool = False,
     overwrite: bool = False,
@@ -428,7 +428,7 @@ def predict(
             print("[Warning] No checkpoint found! Using random initialization.")
 
     # -------------------------------------------------------------------------
-    # FSDP WRAPPING
+    # FSDP wrapping
     # -------------------------------------------------------------------------
     if torch.cuda.is_bf16_supported():
         mp_policy = MixedPrecision(
@@ -481,6 +481,25 @@ def predict(
                     "device": f"cuda:{local_rank}",
                 }
             )
+    elif crops == "validation":
+        test_crops = get_validation_crops()
+        dataset_writers = []
+        for crop in test_crops:
+            raw_path = search_path.format(dataset=crop.dataset, name=raw_name)
+            target_bounds = {"output": {axis: [crop.gt_source.translation[i], crop.gt_source.translation[i] + crop.gt_source.voxel_size[i] * crop.gt_source.shape[i]] for i, axis in enumerate("zyx")}}
+
+            dataset_writers.append(
+                {
+                    "raw_path": raw_path,
+                    "target_path": output_path.format(crop=f"crop{crop.id}", dataset=crop.dataset),
+                    "classes": classes,
+                    "input_arrays": input_arrays,
+                    "target_arrays": target_arrays,
+                    "target_bounds": target_bounds,
+                    "overwrite": overwrite,
+                    "device": f"cuda:{local_rank}",
+                }
+            )
     else:
         crop_list = crops.split(",")
         crop_paths = []
@@ -506,10 +525,7 @@ def predict(
                 for array_name, array_info in target_arrays.items()
             }
 
-            target_bounds = {
-                array_name: image.bounding_box
-                for array_name, image in gt_images.items()
-            }
+            target_bounds = {array_name: image.bounding_box for array_name, image in gt_images.items()}
 
             dataset = get_formatted_fields(raw_path, search_path, ["{dataset}"])["dataset"]
 

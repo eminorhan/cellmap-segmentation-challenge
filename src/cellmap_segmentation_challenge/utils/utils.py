@@ -1,15 +1,19 @@
 import shutil
+import os
 import sys
-from time import time
-import numpy as np
 import requests
+import zarr
+import csv
+import re
+import numpy as np
+from time import time
+from pathlib import Path
+from skimage.measure import label as relabel
+from upath import UPath
 from tqdm import tqdm
 from cellmap_segmentation_challenge.utils import get_tested_classes
 from cellmap_segmentation_challenge import TRUTH_PATH
-import zarr
-from skimage.measure import label as relabel
-
-from upath import UPath
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def format_coordinates(coordinates):
@@ -29,6 +33,222 @@ def format_coordinates(coordinates):
     return f"[{';'.join([str(c) for c in coordinates])}]"
 
 
+def construct_validation_crop_manifest(
+    path_root: str,
+    datasplit_path: str,
+    search_path: str = "{path_root}/{dataset}/{dataset}.zarr/recon-1/labels/groundtruth/{crop}/{label}",
+    write_path: str | None = None,
+    verbose: bool = False,
+) -> None | list[str]:
+    """
+    Construct a manifest file for validation crops based on a datasplit CSV.
+
+    Parameters
+    ----------
+    path_root : str
+        Path to the directory containing the datasets.
+    datasplit_path : str
+        Path to the datasplit.csv file defining train/validate splits.
+    search_path : str, optional
+        Format string to search for the crops.
+        Matches structure: jrc_cos7-1a/jrc_cos7-1a.zarr/recon-1/labels/groundtruth/crop234/ecs
+    write_path : str, optional
+        Path to write the manifest file. Defaults to "validation_crop_manifest.csv" in current dir.
+    verbose : bool, optional
+        Print verbose output.
+    """
+    # Set default write path if not provided
+    if write_path is None:
+        write_path = (Path(__file__).parent / "validation_crop_manifest.csv").as_posix()
+
+    # 1. Parse datasplit.csv to identify validation crops
+    validation_targets = set()
+    
+    print(f"Reading split file: {datasplit_path}")
+    with open(datasplit_path, "r", newline="") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            # Check if row is for validation
+            if row[0] == "validate":
+                # Row[1] example: ".../data/jrc_mus-kidney/jrc_mus-kidney.zarr"
+                # Extract dataset name (e.g., "jrc_mus-kidney")
+                zarr_path = row[1]
+                dataset_name = Path(zarr_path).stem 
+
+                # Row[4] example: "recon-1/labels/groundtruth/crop149/[ecs,pm...]"
+                # Extract crop name (e.g., "crop149")
+                gt_subpath = row[4]
+                # Find the path component that looks like a crop ID (starts with 'crop')
+                parts = gt_subpath.split('/')
+                crop_name = next((p for p in parts if p.startswith("crop")), None)
+
+                if dataset_name and crop_name:
+                    validation_targets.add((dataset_name, crop_name))
+
+    if verbose:
+        print(f"Found {len(validation_targets)} validation targets in split file.")
+
+    # 2. Get the tested classes
+    tested_classes = set(get_tested_classes())
+
+    # 3. Construct the manifest
+    manifest = ["crop_name,dataset,class_label,voxel_size,translation,shape"]
+
+    # Get datasets from filesystem
+    # Note: We assume the first folder in path_root corresponds to the dataset name
+    ds_search_root = search_path.split("{dataset}")[0].format(path_root=path_root)
+    datasets = [d.name for d in UPath(ds_search_root).iterdir() if d.is_dir()]
+
+    for dataset in datasets:
+        # Optimization: Skip datasets not present in our validation list to save time
+        # We check if this dataset appears in ANY tuple in our validation set
+        if not any(t[0] == dataset for t in validation_targets):
+            continue
+
+        print(f"Processing dataset: {dataset}")
+
+        # Get crops
+        # search_path split usually splits at the FIRST occurrence. 
+        # Since we updated search_path to use {dataset} twice, we ensure format fills both.
+        crop_search_root = search_path.split("{crop}")[0].format(path_root=path_root, dataset=dataset)
+        
+        try:
+            crops = [d.name for d in UPath(crop_search_root).iterdir() if d.is_dir()]
+        except FileNotFoundError:
+            if verbose: print(f"\tSkipping {dataset}: Path not found {crop_search_root}")
+            continue
+
+        for crop in crops:
+            # FILTER: Only process if this (dataset, crop) pair is in the validation set
+            if (dataset, crop) not in validation_targets:
+                continue
+
+            if verbose:
+                print(f"\tProcessing validation crop: {crop}")
+
+            # Get labels in crop
+            label_search_root = search_path.split("{label}")[0].format(path_root=path_root, dataset=dataset, crop=crop)
+            had_classes = set([d.name for d in UPath(label_search_root).iterdir() if d.is_dir()])
+
+            # Filter for tested classes
+            labels = list(had_classes.intersection(tested_classes))
+
+            for label in labels:
+                if verbose:
+                    print(f"\t\tProcessing label: {label}")
+
+                try:
+                    # Get the zarr file
+                    full_zarr_path = search_path.format(path_root=path_root, dataset=dataset, crop=crop, label=label)
+                    zarr_file = zarr.open(full_zarr_path, mode="r")
+
+                    # Get the metadata
+                    # Note: Ensure structure matches specifically multiscales -> datasets -> coordinateTransformations
+                    metadata = zarr_file.attrs.asdict()["multiscales"][0]["datasets"][0]["coordinateTransformations"]
+                    
+                    voxel_size = None
+                    translation = None
+
+                    for meta in metadata:
+                        if meta["type"] == "translation":
+                            translation = format_coordinates(meta["translation"])
+                        elif meta["type"] == "scale":
+                            voxel_size = format_coordinates(meta["scale"])
+                    
+                    shape = format_coordinates(zarr_file["s0"].shape)
+                    
+                    # Add to manifest
+                    manifest.append(f"{crop.replace('crop', '')},{dataset},{label},{voxel_size},{translation},{shape}")
+                    
+                    if verbose:
+                        print(f"\t\t\tScale: {voxel_size}\n\t\t\tTranslation: {translation}\n\t\t\tShape: {shape}")
+                except Exception as e:
+                    print(f"Error processing {dataset}/{crop}/{label}: {e}")
+
+    # Write the manifest
+    with open(write_path, "w") as f:
+        f.write("\n".join(manifest))
+
+    print(f"Manifest written to: {write_path}")
+
+
+def construct_validation_truth_dataset(
+    path_root: str,
+    manifest_path: str,
+    search_path: str = "{path_root}/{dataset}/{dataset}.zarr/recon-1/labels/groundtruth/{crop}/{label}",
+    destination: str = "/lustre/blizzard/stf218/scratch/emin/cellmap-segmentation-challenge/data/validation_ground_truth.zarr",
+    write_path: str = "{crop}/{label}",
+):
+    """
+    Construct a consolidated Zarr file for the validation groundtruth datasets using an existing validation crop manifest file.
+
+    Parameters
+    ----------
+    path_root : str
+        Path to the directory containing the datasets.
+    manifest_path : str
+        Path to the existing validation_crop_manifest.csv file.
+    search_path : str, optional
+        Format string to search for the crops.
+    destination : str, optional
+        Path to write the consolidated Zarr file. 
+    write_path : str, optional
+        Format string to write the crops to within the destination Zarr.
+    """
+    start_time = time()
+
+    # 1. READ MANIFEST FROM FILE
+    print(f"Reading manifest from: {manifest_path}")
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(f"Manifest file not found at {manifest_path}. Please run construct_validation_crop_manifest first.")
+
+    with open(manifest_path, "r") as f:
+        # Read lines and strip whitespace
+        manifest = [line.strip() for line in f.readlines() if line.strip()]
+
+    # Basic check to ensure we have data (header + at least 1 row)
+    if len(manifest) <= 1:
+        print("Manifest file is empty or only contains header.")
+        return
+
+    # 2. PREPARE DESTINATION
+    # Open the destination Zarr folder
+    if UPath(destination).exists():
+        print(f"Removing existing ground truth dataset at: {destination}")
+        shutil.rmtree(destination)
+
+    ground_truth = zarr.open_group(destination, mode="a")
+    print(f"Constructing dataset at: {destination}")
+
+    # 3. PROCESS CROPS
+    pool = ThreadPoolExecutor()
+    futures = []
+    crops_started = set()
+    
+    # Skip the header row [1:]
+    for line in tqdm(manifest[1:], desc="Formatting validation ground truth..."):
+        # manifest line: crop_name,dataset,class_label,voxel_size,translation,shape
+        parts = line.split(",")
+        crop_id = parts[0] 
+        
+        # Create the group structure (e.g. "crop149") if we haven't seen this crop yet
+        if crop_id not in crops_started:
+            crops_started.add(crop_id)
+            ground_truth.create_group(f"crop{crop_id}")
+            
+        futures.append(pool.submit(copy_gt, line, search_path, path_root, write_path, ground_truth))
+
+    # 4. WAIT FOR COMPLETION
+    for future in tqdm(as_completed(futures), total=len(futures), desc="Copying..."):
+        try:
+            future.result()
+        except Exception as e:
+            print(f"Task failed with error: {e}")
+
+    print(f"Ground truth dataset written to: {destination}")
+    print(f"Done in {time() - start_time:.2f}s!")
+
+
 def construct_test_crop_manifest(
     path_root: str,
     search_path: str = "{path_root}/{dataset}/groundtruth.zarr/{crop}/{label}",
@@ -43,7 +263,8 @@ def construct_test_crop_manifest(
     path_root : str
         Path to the directory containing the datasets.
     search_path : str, optional
-        Format string to search for the crops. The default is "{path_root}/{dataset}/groundtruth.zarr/{crop}/{label}". The function assumes that the keys appear in the file tree in the following order: 1) "path_root", 2) "dataset", 3) "crop", 4) "label"
+        Format string to search for the crops. The default is "{path_root}/{dataset}/groundtruth.zarr/{crop}/{label}". 
+        The function assumes that the keys appear in the file tree in the following order: 1) "path_root", 2) "dataset", 3) "crop", 4) "label"
     write_path : str, optional
         Path to write the manifest file. The default is "test_crop_manifest.csv".
     verbose : bool, optional
@@ -53,48 +274,23 @@ def construct_test_crop_manifest(
     tested_classes = set(get_tested_classes())
 
     # Construct the manifest
-    manifest = [
-        "crop_name,dataset,class_label,voxel_size,translation,shape",
-    ]
+    manifest = ["crop_name,dataset,class_label,voxel_size,translation,shape"]
 
     # Get datasets
-    datasets = [
-        d.name
-        for d in UPath(
-            search_path.split("{dataset}")[0].format(path_root=path_root)
-        ).iterdir()
-        if d.is_dir()
-    ]
+    datasets = [d.name for d in UPath(search_path.split("{dataset}")[0].format(path_root=path_root)).iterdir() if d.is_dir()]
 
     for dataset in datasets:
         print(f"Processing dataset: {dataset}")
 
         # Get crops
-        crops = [
-            d.name
-            for d in UPath(
-                search_path.split("{crop}")[0].format(
-                    path_root=path_root, dataset=dataset
-                )
-            ).iterdir()
-            if d.is_dir()
-        ]
+        crops = [d.name for d in UPath(search_path.split("{crop}")[0].format(path_root=path_root, dataset=dataset)).iterdir() if d.is_dir()]
+
         for crop in crops:
             if verbose:
                 print(f"\tProcessing crop: {crop}")
 
             # Get labels in crop
-            had_classes = set(
-                [
-                    d.name
-                    for d in UPath(
-                        search_path.split("{label}")[0].format(
-                            path_root=path_root, dataset=dataset, crop=crop
-                        )
-                    ).iterdir()
-                    if d.is_dir()
-                ]
-            )
+            had_classes = set([d.name for d in UPath(search_path.split("{label}")[0].format(path_root=path_root, dataset=dataset, crop=crop)).iterdir() if d.is_dir()])
 
             # Filter for tested classes
             labels = list(had_classes.intersection(tested_classes))
@@ -102,31 +298,23 @@ def construct_test_crop_manifest(
             for label in labels:
                 if verbose:
                     print(f"\t\tProcessing label: {label}")
+
                 # Get the zarr file
-                zarr_file = zarr.open(
-                    search_path.format(
-                        path_root=path_root, dataset=dataset, crop=crop, label=label
-                    ),
-                    mode="r",
-                )
+                zarr_file = zarr.open(search_path.format(path_root=path_root, dataset=dataset, crop=crop, label=label), mode="r")
 
                 # Get the metadata
-                metadata = zarr_file.attrs.asdict()["multiscales"][0]["datasets"][0][
-                    "coordinateTransformations"
-                ]
+                metadata = zarr_file.attrs.asdict()["multiscales"][0]["datasets"][0]["coordinateTransformations"]
+
                 for meta in metadata:
                     if meta["type"] == "translation":
                         translation = format_coordinates(meta["translation"])
                     elif meta["type"] == "scale":
                         voxel_size = format_coordinates(meta["scale"])
                 shape = format_coordinates(zarr_file["s0"].shape)
-                manifest.append(
-                    f"{crop.replace('crop', '')},{dataset},{label},{voxel_size},{translation},{shape}"
-                )
+                manifest.append(f"{crop.replace('crop', '')},{dataset},{label},{voxel_size},{translation},{shape}")
                 if verbose:
-                    print(
-                        f"\t\t\tScale: {voxel_size}\n\t\t\tTranslation: {translation}\n\t\t\tShape: {shape}"
-                    )
+                    print(f"\t\t\tScale: {voxel_size}\n\t\t\tTranslation: {translation}\n\t\t\tShape: {shape}")
+
     if write_path is None:
         return manifest
 
@@ -151,7 +339,8 @@ def construct_truth_dataset(
     path_root : str
         Path to the directory containing the datasets.
     search_path : str, optional
-        Format string to search for the crops. The default is "{path_root}/{dataset}/groundtruth.zarr/{crop}/{label}". The function assumes that the keys appear in the file tree in the following order: 1) "path_root", 2) "dataset", 3) "crop", 4) "label"
+        Format string to search for the crops. The default is "{path_root}/{dataset}/groundtruth.zarr/{crop}/{label}". 
+        The function assumes that the keys appear in the file tree in the following order: 1) "path_root", 2) "dataset", 3) "crop", 4) "label"
     destination : str, optional
         Path to write the consolidated Zarr file. The default is "cellmap-segmentation-challenge/data/ground_truth.zarr".
     write_path : str, optional
@@ -166,6 +355,7 @@ def construct_truth_dataset(
     if UPath(destination).exists():
         print(f"Removing existing ground truth dataset at: {destination}")
         shutil.rmtree(destination)
+
     # ground_truth = zarr.open_group(destination, mode="w")
     ground_truth = zarr.open_group(destination, mode="a")
 
@@ -182,9 +372,7 @@ def construct_truth_dataset(
         if crop not in crops_started:
             crops_started.add(crop)
             ground_truth.create_group(f"crop{crop}")
-        futures.append(
-            pool.submit(copy_gt, line, search_path, path_root, write_path, ground_truth)
-        )
+        futures.append(pool.submit(copy_gt, line, search_path, path_root, write_path, ground_truth))
 
     for future in tqdm(as_completed(futures), total=len(futures), desc="Copying..."):
         future.result()
@@ -202,9 +390,7 @@ def copy_gt(line, search_path, path_root, write_path, ground_truth):
     shape = eval(shape.replace(";", ","))
 
     # Open the source ground truth zarr file
-    path = search_path.format(
-        path_root=path_root, dataset=dataset, crop=crop_name, label=class_label
-    )
+    path = search_path.format(path_root=path_root, dataset=dataset, crop=crop_name, label=class_label)
     zarr_file = zarr.open(path, mode="r")
 
     # Write the dataset to the destination Zarr
@@ -223,9 +409,6 @@ def copy_gt(line, search_path, path_root, write_path, ground_truth):
     dataset.attrs["shape"] = shape
 
 
-# %%
-
-
 # Helper functions for simulating predictions
 def simulate_predictions_iou_binary(labels, iou):
     # TODO: Add false positives (only makes false negatives currently)
@@ -242,14 +425,11 @@ def simulate_predictions_iou_binary(labels, iou):
 
 def simulate_predictions_iou(true_labels, iou):
     # TODO: Add false positives (only makes false negatives currently)
-
     pred_labels = np.zeros_like(true_labels)
     for i in np.unique(true_labels):
         if i == 0:
             continue
-        pred_labels[true_labels == i] = np.random.choice(
-            [i, 0], np.sum(true_labels == i), p=[iou, 1 - iou]
-        )
+        pred_labels[true_labels == i] = np.random.choice([i, 0], np.sum(true_labels == i), p=[iou, 1 - iou])
 
     pred_labels = relabel(pred_labels, connectivity=len(pred_labels.shape))
     return pred_labels
@@ -268,9 +448,7 @@ def simulate_predictions_accuracy(true_labels, accuracy):
     # Randomly select indices to be incorrect
     incorrect_indices = np.random.choice(n, size=n - int(accuracy * n), replace=False)
 
-    simulated_predictions[incorrect_indices] = (
-        1 - simulated_predictions[incorrect_indices]
-    )
+    simulated_predictions[incorrect_indices] = (1 - simulated_predictions[incorrect_indices])
 
     # Reshape and relabel the predictions
     simulated_predictions = simulated_predictions.reshape(shape)
@@ -308,11 +486,7 @@ def perturb_instance_mask(true_labels, hd_target=None, accuracy=0.8):
         indices = list(indices)
         for i in range(3):
             shift = np.random.randint(-hd_target, hd_target + 1)
-            shift = np.clip(
-                shift,
-                -indices[i].min(),
-                true_labels.shape[i] - (indices[i].max() + 1),
-            )
+            shift = np.clip(shift, -indices[i].min(), true_labels.shape[i] - (indices[i].max() + 1))
 
             indices[i] += shift
         indices = tuple(indices)
@@ -364,12 +538,17 @@ def format_string(string: str, format_kwargs: dict) -> str:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python utils.py <path_root>")
-        sys.exit(1)
-    elif len(sys.argv) == 2 or sys.argv[2] == "dataset":
-        construct_truth_dataset(
-            sys.argv[1],
-        )
-    elif sys.argv[2] == "manifest":
-        construct_test_crop_manifest(sys.argv[1], verbose=True)
+
+    PATH_ROOT = "/lustre/blizzard/stf218/scratch/emin/cellmap-segmentation-challenge/data"
+    MANIFEST_PATH = "validation_crop_manifest.csv"
+    
+    # construct_validation_crop_manifest(PATH_ROOT, DATASPLIT_PATH, verbose=True)
+    construct_validation_truth_dataset(PATH_ROOT, MANIFEST_PATH)
+
+    # if len(sys.argv) < 2:
+    #     print("Usage: python utils.py <path_root>")
+    #     sys.exit(1)
+    # elif len(sys.argv) == 2 or sys.argv[2] == "dataset":
+    #     construct_truth_dataset(sys.argv[1])
+    # elif sys.argv[2] == "manifest":
+    #     construct_test_crop_manifest(sys.argv[1], verbose=True)
