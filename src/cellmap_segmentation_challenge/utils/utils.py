@@ -540,9 +540,10 @@ def format_string(string: str, format_kwargs: dict) -> str:
 if __name__ == "__main__":
 
     PATH_ROOT = "/lustre/blizzard/stf218/scratch/emin/cellmap-segmentation-challenge/data"
+    DATASPLIT_PATH = "/lustre/blizzard/stf218/scratch/emin/cellmap-segmentation-challenge/examples/datasplit.csv"
     MANIFEST_PATH = "validation_crop_manifest.csv"
     
-    # construct_validation_crop_manifest(PATH_ROOT, DATASPLIT_PATH, verbose=True)
+    construct_validation_crop_manifest(PATH_ROOT, DATASPLIT_PATH, verbose=True)
     construct_validation_truth_dataset(PATH_ROOT, MANIFEST_PATH)
 
     # if len(sys.argv) < 2:

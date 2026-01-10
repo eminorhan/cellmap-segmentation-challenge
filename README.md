@@ -1,6 +1,8 @@
 <img src="https://raw.githubusercontent.com/janelia-cellmap/dacapo/main/docs/source/_static/CellMapLogo.png" alt="CellMap logo" width="85%">
 
-Data download:
+To create validation crop manifest file and ground truth dataset, run [`src/cellmap_segmentation_challenge/utils/utils.py`](src/cellmap_segmentation_challenge/utils/utils.py)
+
+To download the full data:
 ```bash
 csc fetch-data --raw-padding 128 --fetch-all-em-resolutions --batch-size 1024 --num-workers 64
 ```
